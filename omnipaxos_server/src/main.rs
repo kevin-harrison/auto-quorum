@@ -1,13 +1,13 @@
+use crate::{network::Network, server::OmniPaxosServer};
 use env_logger;
-
-use omnipaxos::{OmniPaxosConfig, ServerConfig, ClusterConfig, util::NodeId};
+use omnipaxos::{util::NodeId, ClusterConfig, OmniPaxosConfig, ServerConfig};
 use tokio::sync::mpsc;
-use crate::{server::OmniPaxosServer, network::Network};
 
-mod kv;
-mod server;
-mod messages;
+mod database;
+// mod kv;
+// mod messages;
 mod network;
+mod server;
 
 #[tokio::main]
 pub async fn main() {
@@ -15,14 +15,20 @@ pub async fn main() {
 
     // Server ID
     let args: Vec<String> = std::env::args().collect();
-    let id: NodeId = args.get(1).expect("Must pass a node ID.").parse().expect("Unable to parse node ID.");
-    let peers = vec![1,2,3].into_iter().filter(|pid| *pid != id).collect();
+    let id: NodeId = args
+        .get(1)
+        .expect("Must pass a node ID.")
+        .parse()
+        .expect("Unable to parse node ID.");
+    let peers = vec![1, 2, 3].into_iter().filter(|pid| *pid != id).collect();
 
     // Server and Network channels
     let (server_sender, server_receiver) = mpsc::channel(100);
     let (network_sender, network_receiver) = mpsc::channel(100);
 
-    let mut network = Network::new(id, peers, network_receiver, server_sender).await.unwrap();
+    let mut network = Network::new(id, peers, network_receiver, server_sender)
+        .await
+        .unwrap();
 
     let cluster_config = ClusterConfig {
         configuration_id: 1,
@@ -37,7 +43,7 @@ pub async fn main() {
         cluster_config,
         server_config,
     };
-    let mut server = OmniPaxosServer::new(id, omnipaxos_config, network_sender, server_receiver);
+    let mut server = OmniPaxosServer::new(omnipaxos_config, network_sender, server_receiver);
 
     tokio::join!(network.run(), server.run());
 }

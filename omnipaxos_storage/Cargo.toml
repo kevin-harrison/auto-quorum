@@ -7,4 +7,4 @@ description = "Storage implementations for OmniPaxos."
 readme = "README.md"
 
 [dependencies]
-omnipaxos = { git = "https://github.com/kevin-harrison/omnipaxos-fork", branch = "auto-quorum", features = ["serde"] }
+omnipaxos = { git = "https://github.com/kevin-harrison/omnipaxos.git", branch = "auto-quorum", features = ["serde"] }

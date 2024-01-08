@@ -1,8 +1,7 @@
 use omnipaxos::{messages::Message as OmniPaxosMessage, util::NodeId};
 use serde::{Deserialize, Serialize};
 
-use crate::kv::{Command, CommandId};
-use crate::network::ClientId;
+use crate::kv::{Command, CommandId, ClientId};
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub enum NetworkMessage {
@@ -13,13 +12,6 @@ pub enum NetworkMessage {
     ClientRequest(ClientRequest),
     ClientResponse(ClientResponse),
 }
-
-// #[derive(Clone, Debug, Serialize, Deserialize)]
-// pub enum ServerMessage {
-//     ServerToServer(OmniPaxosMessage<KVCommand>), // to server
-//     ServerToClient(ClientId, CommandId, Option<String>), // to client
-//     ClientToServer(ClientId, CommandId, KVCommand), // from client to?
-// }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ServerRequest {
