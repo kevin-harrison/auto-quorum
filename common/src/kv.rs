@@ -16,7 +16,7 @@ pub struct Command {
 pub enum KVCommand {
     Put(String, String),
     Delete(String),
-    Get(String),
+    // Get(String),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -40,7 +40,7 @@ impl Snapshot<Command> for KVSnapshot {
                         deleted_keys.push(key.clone());
                     }
                 }
-                KVCommand::Get(_) => (),
+                // KVCommand::Get(_) => (),
             }
         }
         // remove keys that were put back

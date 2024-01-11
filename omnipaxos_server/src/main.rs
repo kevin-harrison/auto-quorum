@@ -4,10 +4,9 @@ use omnipaxos::{util::NodeId, ClusterConfig, OmniPaxosConfig, ServerConfig};
 use tokio::sync::mpsc;
 
 mod database;
-// mod kv;
-// mod messages;
 mod network;
 mod server;
+mod read;
 
 #[tokio::main]
 pub async fn main() {

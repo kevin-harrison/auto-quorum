@@ -1,6 +1,6 @@
+use futures::{SinkExt, StreamExt};
 use std::{env, net::SocketAddr};
 use tokio::net::TcpStream;
-use futures::{SinkExt, StreamExt};
 use tokio_serde::{formats::Cbor, Framed};
 use tokio_util::codec::{Framed as CodecFramed, LengthDelimitedCodec};
 
@@ -41,13 +41,17 @@ impl Client {
             Err(err) => println!("Failed to send message: {}", err),
         }
         let id = match framed.next().await {
-            Some(Ok(NetworkMessage::ClientResponse(ClientResponse::AssignedID(id)))) => id,
+            Some(Ok(NetworkMessage::ClientToMsg(ClientToMsg::AssignedID(id)))) => id,
             Some(Ok(m)) => panic!("Unexpected message: {m:?}"),
             Some(Err(err)) => panic!("Error deserializing: {err}"),
             None => panic!("Connection to server lost."),
         };
         println!("Assigned ID: {id}");
-        Self { id , command_id: 0, server: framed }
+        Self {
+            id,
+            command_id: 0,
+            server: framed,
+        }
     }
 
     fn get_next_command_id(&mut self) -> CommandId {
@@ -55,16 +59,20 @@ impl Client {
         self.command_id
     }
 
-    async fn send_request(&mut self, request: ClientRequest) {
+    async fn send_request(&mut self, request: ClientFromMsg) {
         println!("Sending request: {request:?}");
-        if let Err(err) = self.server.send(NetworkMessage::ClientRequest(request)).await {
+        if let Err(err) = self
+            .server
+            .send(NetworkMessage::ClientFromMsg(request))
+            .await
+        {
             println!("Failed to send message: {}", err);
         }
     }
 
-    async fn get_response(&mut self) -> ClientResponse {
+    async fn get_response(&mut self) -> ClientToMsg {
         match self.server.next().await {
-            Some(Ok(NetworkMessage::ClientResponse(response))) => response,
+            Some(Ok(NetworkMessage::ClientToMsg(response))) => response,
             Some(Ok(m)) => panic!("Unexpected message: {m:?}"),
             Some(Err(err)) => panic!("Error deserializing: {err}"),
             None => panic!("Connection to server lost."),
@@ -77,7 +85,7 @@ impl Client {
             id: self.get_next_command_id(),
             command: kv_command,
         };
-        let request = ClientRequest::Append(command);
+        let request = ClientFromMsg::Append(command);
         self.send_request(request).await;
         let response = self.get_response().await;
         println!("Got response: {response:?}");
@@ -110,6 +118,6 @@ pub async fn main() {
     // }
     let mut client = Client::new(1).await;
     for i in 0..13 {
-        client.put(i.to_string(), (i+100).to_string()).await;
+        client.put(i.to_string(), (i + 100).to_string()).await;
     }
 }

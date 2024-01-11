@@ -1,51 +1,56 @@
 use omnipaxos::{messages::Message as OmniPaxosMessage, util::NodeId};
 use serde::{Deserialize, Serialize};
 
-use crate::kv::{Command, CommandId, ClientId};
+use crate::kv::{ClientId, Command, CommandId};
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub enum NetworkMessage {
     NodeHandshake(NodeId),
     ClientHandshake,
-    ServerRequest(ServerRequest),
-    ServerResponse(ServerResponse),
-    ClientRequest(ClientRequest),
-    ClientResponse(ClientResponse),
+    ServerToMsg(ServerToMsg),
+    ServerFromMsg(ServerFromMsg),
+    ClientFromMsg(ClientFromMsg),
+    ClientToMsg(ClientToMsg),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub enum ServerRequest {
-    FromServer(ServerMessage),
-    FromClient(ClientRequest),
+pub enum ServerToMsg {
+    FromServer(ClusterMessage),
+    FromClient(ClientFromMsg),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub enum ServerResponse {
-    ToServer(ServerMessage),
-    ToClient(ClientId, ClientResponse),
+pub enum ServerFromMsg {
+    ToServer(ClusterMessage),
+    ToClient(ClientId, ClientToMsg),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub enum ServerMessage {
+pub enum ClusterMessage {
     OmniPaxosMessage(OmniPaxosMessage<Command>),
+    QuorumRead(NodeId),
+    QuorumReadResponse(NodeId, usize, usize),
 }
 
-impl ServerMessage {
+impl ClusterMessage {
     pub fn get_receiver(&self) -> NodeId {
         match self {
-            ServerMessage::OmniPaxosMessage(m) => m.get_receiver(),
+            ClusterMessage::OmniPaxosMessage(m) => m.get_receiver(),
+            ClusterMessage::QuorumRead(to, _, _) => *to,
+            ClusterMessage::QuorumReadResponse(to, _, _, _) => *to,
         }
     }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub enum ClientRequest {
+pub enum ClientFromMsg {
     Append(Command),
+    Read(ClientId, CommandId, String),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub enum ClientResponse {
+pub enum ClientToMsg {
     AssignedID(ClientId),
-    Read(CommandId, String),
+    Read(CommandId, Option<String>),
     Write(CommandId),
 }
