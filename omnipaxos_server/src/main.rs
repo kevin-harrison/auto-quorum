@@ -4,7 +4,6 @@ use omnipaxos::{util::NodeId, ClusterConfig, OmniPaxosConfig, ServerConfig};
 
 mod database;
 mod network;
-mod read;
 mod server;
 
 #[tokio::main]

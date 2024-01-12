@@ -1,9 +1,8 @@
 use futures::StreamExt;
-use log::*;
 use std::{collections::HashMap, time::Duration};
 
 use omnipaxos::{
-    util::{LogEntry, NodeId},
+    util::LogEntry,
     OmniPaxos, OmniPaxosConfig,
 };
 use omnipaxos_storage::memory_storage::MemoryStorage;
@@ -18,7 +17,6 @@ pub struct OmniPaxosServer {
     network: Network,
     omnipaxos: OmniPaxosInstance,
     current_decided_idx: usize,
-    latencies: Vec<Option<u128>>,
     pending_responses: HashMap<CommandId, ClientId>,
 }
 
@@ -33,7 +31,6 @@ impl OmniPaxosServer {
             .filter(|pid| *pid != id)
             .collect();
         let network = Network::new(id, peers).await.unwrap();
-        let cluster_size = omnipaxos_config.cluster_config.nodes.len();
         let storage: MemoryStorage<Command> = MemoryStorage::default();
         let omnipaxos = omnipaxos_config.build(storage).unwrap();
         OmniPaxosServer {
@@ -41,7 +38,6 @@ impl OmniPaxosServer {
             network,
             omnipaxos,
             current_decided_idx: 0,
-            latencies: vec![None; cluster_size],
             pending_responses: HashMap::new(),
         }
     }
@@ -53,7 +49,7 @@ impl OmniPaxosServer {
         loop {
             tokio::select! {
                 biased;
-                _ = election_interval.tick() => { self.handle_election_timeout(); },
+                _ = election_interval.tick() => { self.omnipaxos.election_timeout(); },
                 _ = outgoing_interval.tick() => {
                     self.handle_decided_entries().await;
                     self.send_outgoing_msgs().await;
@@ -61,10 +57,6 @@ impl OmniPaxosServer {
                 Some(msg) = self.network.next() => { self.handle_incoming_msg(msg).await; },
             }
         }
-    }
-
-    fn handle_election_timeout(&mut self) {
-        self.latencies = self.omnipaxos.election_timeout();
     }
 
     async fn handle_decided_entries(&mut self) {

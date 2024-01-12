@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Error};
+use anyhow::Error;
 use common::kv::Command;
 use futures::{SinkExt, Stream, StreamExt};
 use log::*;
