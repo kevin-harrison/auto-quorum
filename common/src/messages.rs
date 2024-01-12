@@ -28,8 +28,8 @@ pub enum ServerFromMsg {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ClusterMessage {
     OmniPaxosMessage(OmniPaxosMessage<Command>),
-    QuorumRead(NodeId),
-    QuorumReadResponse(NodeId, usize, usize),
+    QuorumRead(NodeId, CommandId, String),
+    QuorumReadResponse(NodeId, CommandId, usize, usize),
 }
 
 impl ClusterMessage {

@@ -1,4 +1,4 @@
-use omnipaxos::{macros::Entry, storage::Snapshot};
+use omnipaxos::{macros::Entry, storage::Snapshot, util::NodeId};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -9,6 +9,7 @@ pub type ClientId = u64;
 pub struct Command {
     pub id: CommandId,
     pub client_id: ClientId,
+    pub coordinator_id: NodeId,
     pub command: KVCommand,
 }
 
@@ -39,8 +40,7 @@ impl Snapshot<Command> for KVSnapshot {
                         // key was not in the snapshot
                         deleted_keys.push(key.clone());
                     }
-                }
-                // KVCommand::Get(_) => (),
+                } // KVCommand::Get(_) => (),
             }
         }
         // remove keys that were put back

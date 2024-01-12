@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
 
-use common::kv::{CommandId, ClientId};
+use common::kv::{ClientId, CommandId};
 
 type AcceptedIdx = usize;
 
@@ -21,8 +21,8 @@ pub struct QuorumReader {
 impl QuorumReader {
     pub fn new() -> Self {
         Self {
-        awaiting_replies: HashMap::new(),
-        awaiting_decide: BTreeMap::new(),
+            awaiting_replies: HashMap::new(),
+            awaiting_decide: BTreeMap::new(),
         }
     }
     pub fn rinse(&mut self, new_decided_idx: usize) -> Option<Vec<ReadState>> {
@@ -31,12 +31,22 @@ impl QuorumReader {
         unimplemented!();
     }
 
-    pub fn new_read(&mut self, command_id: CommandId, read_quorum: usize, accepted_idx: AcceptedIdx) {
+    pub fn new_read(
+        &mut self,
+        command_id: CommandId,
+        read_quorum: usize,
+        accepted_idx: AcceptedIdx,
+    ) {
         // add to awaiting replies
         unimplemented!();
     }
 
-    pub fn new_response(&mut self, command_id: CommandId, read_quorum: usize, accepted_idx: AcceptedIdx) -> Option<Vec<ReadState>> {
+    pub fn new_response(
+        &mut self,
+        command_id: CommandId,
+        read_quorum: usize,
+        accepted_idx: AcceptedIdx,
+    ) -> Option<Vec<ReadState>> {
         // update read state with command_id
         // if read_quorum = # of replies => move to rinse datastructure
         unimplemented!();

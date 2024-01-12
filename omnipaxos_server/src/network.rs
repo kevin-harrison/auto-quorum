@@ -1,13 +1,14 @@
 use anyhow::{anyhow, Error};
-use futures::{SinkExt, StreamExt};
+use futures::{SinkExt, Stream, StreamExt};
 use log::*;
 use omnipaxos::messages::ballot_leader_election::BLEMsg;
 use omnipaxos::messages::Message as OmniPaxosMessage;
 use omnipaxos::util::NodeId;
 use std::collections::HashMap;
-use std::io;
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
@@ -48,15 +49,14 @@ enum NewConnection {
 
 pub struct Network {
     id: NodeId,
-    peers: Vec<NodeId>,
     listener: TcpListener,
     cluster_connections: HashMap<NodeId, NetworkSink>,
     client_connections: HashMap<ClientId, NetworkSink>,
     max_client_id: Arc<Mutex<ClientId>>,
-    new_connection_sink: Sender<NewConnection>,
-    new_connection_source: Receiver<NewConnection>,
-    outgoing_messages: Receiver<ServerFromMsg>,
-    incoming_messages: Sender<ServerToMsg>,
+    connection_sink: Sender<NewConnection>,
+    connection_source: Receiver<NewConnection>,
+    message_sink: Sender<ServerToMsg>,
+    message_source: Receiver<ServerToMsg>,
 }
 
 impl Network {
@@ -65,53 +65,48 @@ impl Network {
         SocketAddr::from(([127, 0, 0, 1], port))
     }
 
-    pub async fn new(
-        id: NodeId,
-        peers: Vec<NodeId>,
-        outgoing_messages: Receiver<ServerFromMsg>,
-        incoming_messages: Sender<ServerToMsg>,
-    ) -> Result<Self, Error> {
-        let (new_connection_sink, new_connection_source) = mpsc::channel(100);
-        Ok(Self {
+    pub async fn new(id: NodeId, peers: Vec<NodeId>) -> Result<Self, Error> {
+        let (connection_sink, connection_source) = mpsc::channel(100);
+        let (message_sink, message_source) = mpsc::channel(100);
+        let mut network = Self {
             id,
-            peers,
             listener: TcpListener::bind(Self::get_node_addr(id)).await?,
             cluster_connections: HashMap::new(),
             client_connections: HashMap::new(),
             max_client_id: Arc::new(Mutex::new(0)),
-            new_connection_sink,
-            new_connection_source,
-            incoming_messages,
-            outgoing_messages,
-        })
+            connection_sink,
+            connection_source,
+            message_sink,
+            message_source,
+        };
+        // Create connections to other servers
+        for peer in peers.into_iter().filter(|p| *p < id) {
+            network.connect_to_node(peer);
+        }
+        Ok(network)
     }
 
-    pub async fn run(&mut self) {
-        for peer in self.peers.iter().filter(|p| **p < self.id) {
-            self.create_connection_to_node(*peer);
-        }
-        loop {
-            tokio::select! {
-                biased;
-                Some(connection) = self.new_connection_source.recv() => { self.handle_identified_connection(connection); }
-                Some(msg) = self.outgoing_messages.recv() => { self.send_message(msg).await; },
-                connection = self.listener.accept() => { self.incoming_connection(connection); },
+    fn connect_to_node(&mut self, to: NodeId) {
+        debug!("Trying to connect to node {to}");
+        let message_sink = self.message_sink.clone();
+        let connection_sink = self.connection_sink.clone();
+        let from = self.id;
+        tokio::spawn(async move {
+            match TcpStream::connect(Self::get_node_addr(to)).await {
+                Ok(connection) => {
+                    debug!("New connection to node {to}");
+                    Self::handle_connection_to_node(
+                        connection,
+                        message_sink,
+                        connection_sink,
+                        from,
+                        to,
+                    )
+                    .await;
+                }
+                Err(err) => error!("Establishing connection to node {to} failed: {err}"),
             }
-        }
-    }
-
-    fn incoming_connection(&mut self, connection: io::Result<(TcpStream, SocketAddr)>) {
-        let (socket, socket_addr) = connection.expect("Failed to accept connection");
-        debug!("New incoming connection from {socket_addr:?}");
-        let incoming_message_sink = self.incoming_messages.clone();
-        let new_connection_sink = self.new_connection_sink.clone();
-        let max_client_id_handle = self.max_client_id.clone();
-        tokio::spawn(Self::handle_incoming_connection(
-            socket,
-            incoming_message_sink,
-            new_connection_sink,
-            max_client_id_handle,
-        ));
+        });
     }
 
     async fn handle_incoming_connection(
@@ -182,29 +177,6 @@ impl Network {
         }
     }
 
-    fn create_connection_to_node(&self, to: NodeId) {
-        debug!("Trying to connect to node {to}");
-        let incoming_message_sink = self.incoming_messages.clone();
-        let new_connection_sink = self.new_connection_sink.clone();
-        let my_id = self.id.clone();
-        tokio::spawn(async move {
-            match TcpStream::connect(Self::get_node_addr(to)).await {
-                Ok(connection) => {
-                    debug!("New connection to node {to}");
-                    Self::handle_connection_to_node(
-                        connection,
-                        incoming_message_sink,
-                        new_connection_sink,
-                        my_id,
-                        to,
-                    )
-                    .await;
-                }
-                Err(err) => error!("Establishing connection to node {to} failed: {err}"),
-            }
-        });
-    }
-
     async fn handle_connection_to_node(
         connection: TcpStream,
         message_sink: Sender<ServerToMsg>,
@@ -251,7 +223,7 @@ impl Network {
         };
     }
 
-    async fn send_message(&mut self, message: ServerFromMsg) {
+    pub async fn send(&mut self, message: ServerFromMsg) {
         match message {
             ServerFromMsg::ToClient(client_id, client_response) => {
                 self.send_to_client(client_id, client_response).await
@@ -278,7 +250,7 @@ impl Network {
             if let ClusterMessage::OmniPaxosMessage(OmniPaxosMessage::BLE(m)) = msg {
                 if let BLEMsg::HeartbeatRequest(_) = m.msg {
                     if m.to == to {
-                        self.create_connection_to_node(to);
+                        self.connect_to_node(to);
                     }
                 }
             }
@@ -297,5 +269,52 @@ impl Network {
         } else {
             warn!("Not connected to client {to}");
         }
+    }
+}
+
+#[derive(Debug)]
+pub enum NetworkError {
+    SocketListenerFailure,
+    InternalChannelFailure,
+}
+
+impl Stream for Network {
+    type Item = Result<ServerToMsg, NetworkError>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        // Poll new incoming connection
+        if let Poll::Ready(val) = Pin::new(&mut self.as_mut().listener).poll_accept(cx) {
+            match val {
+                Ok((tcp_stream, socket_addr)) => {
+                    debug!("New connection from {socket_addr}");
+                    tokio::spawn(Self::handle_incoming_connection(
+                        tcp_stream,
+                        self.message_sink.clone(),
+                        self.connection_sink.clone(),
+                        self.max_client_id.clone(),
+                    ));
+                }
+                Err(err) => {
+                    error!("Error checking for new requests: {:?}", err);
+                    return Poll::Ready(Some(Err(NetworkError::SocketListenerFailure)));
+                }
+            }
+        }
+        // Poll new identified connection
+        if let Poll::Ready(val) = self.connection_source.poll_recv(cx) {
+            match val {
+                Some(new_conn) => self.handle_identified_connection(new_conn),
+                None => return Poll::Ready(Some(Err(NetworkError::InternalChannelFailure))),
+            }
+        }
+        // Poll new incoming message
+        if let Poll::Ready(val) = self.message_source.poll_recv(cx) {
+            match val {
+                Some(msg) => return Poll::Ready(Some(Ok(msg))),
+                None => return Poll::Ready(Some(Err(NetworkError::InternalChannelFailure))),
+            }
+        }
+        // Nothing to yield yet
+        return Poll::Pending;
     }
 }

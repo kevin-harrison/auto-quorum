@@ -1,3 +1,4 @@
+use futures::StreamExt;
 use log::*;
 use std::{collections::HashMap, time::Duration};
 
@@ -6,17 +7,16 @@ use omnipaxos::{
     OmniPaxos, OmniPaxosConfig,
 };
 use omnipaxos_storage::memory_storage::MemoryStorage;
-use tokio::sync::mpsc::{Receiver, Sender};
 
-use crate::{database::Database, read::QuorumReader};
+use crate::{database::Database, network::{Network, NetworkError}, read::QuorumReader};
 use common::{kv::*, messages::*};
 
 type OmniPaxosInstance = OmniPaxos<Command, MemoryStorage<Command>>;
 
 pub struct OmniPaxosServer {
+    id: NodeId,
     database: Database,
-    outgoing_messages: Sender<ServerFromMsg>,
-    incoming_messages: Receiver<ServerToMsg>,
+    network: Network,
     omnipaxos: OmniPaxosInstance,
     current_decided_idx: usize,
     latencies: Vec<Option<u128>>,
@@ -24,18 +24,23 @@ pub struct OmniPaxosServer {
 }
 
 impl OmniPaxosServer {
-    pub fn new(
-        omnipaxos_config: OmniPaxosConfig,
-        outgoing_messages: Sender<ServerFromMsg>,
-        incoming_messages: Receiver<ServerToMsg>,
-    ) -> Self {
+    pub async fn new(omnipaxos_config: OmniPaxosConfig) -> Self {
+        let id = omnipaxos_config.server_config.pid;
+        let peers = omnipaxos_config
+            .cluster_config
+            .nodes
+            .iter()
+            .cloned()
+            .filter(|pid| *pid != id)
+            .collect();
+        let network = Network::new(id, peers).await.unwrap();
         let cluster_size = omnipaxos_config.cluster_config.nodes.len();
         let storage: MemoryStorage<Command> = MemoryStorage::default();
         let omnipaxos = omnipaxos_config.build(storage).unwrap();
         OmniPaxosServer {
+            id,
             database: Database::new(),
-            outgoing_messages,
-            incoming_messages,
+            network,
             omnipaxos,
             current_decided_idx: 0,
             latencies: vec![None; cluster_size],
@@ -55,7 +60,7 @@ impl OmniPaxosServer {
                     self.handle_decided_entries().await;
                     self.send_outgoing_msgs().await;
                 },
-                Some(msg) = self.incoming_messages.recv() => { self.handle_incoming_msg(msg).await; },
+                Some(msg) = self.network.next() => { self.handle_incoming_msg(msg).await; },
             }
         }
     }
@@ -102,11 +107,13 @@ impl OmniPaxosServer {
                 KVCommand::Put(k, v) => self.database.put(k, v),
                 KVCommand::Delete(k) => self.database.delete(&k),
             };
-            let response = ClientToMsg::Write(command.id);
-            self.outgoing_messages
-                .send(ServerFromMsg::ToClient(command.id, response))
-                .await
-                .unwrap();
+            if command.coordinator_id == self.id {
+                error!("SENDING REPLY TO CLIENT");
+                let response = ClientToMsg::Write(command.id);
+                self.network
+                    .send(ServerFromMsg::ToClient(command.client_id, response))
+                    .await;
+            }
         }
     }
 
@@ -114,17 +121,17 @@ impl OmniPaxosServer {
         let messages = self.omnipaxos.outgoing_messages();
         for msg in messages {
             let cluster_msg = ClusterMessage::OmniPaxosMessage(msg);
-            self.outgoing_messages
+            self.network
                 .send(ServerFromMsg::ToServer(cluster_msg))
-                .await
-                .unwrap();
+                .await;
         }
     }
 
-    async fn handle_incoming_msg(&mut self, msg: ServerToMsg) {
+    async fn handle_incoming_msg(&mut self, msg: Result<ServerToMsg, NetworkError>) { 
         match msg {
-            ServerToMsg::FromClient(m) => self.handle_incoming_client_msg(m).await,
-            ServerToMsg::FromServer(m) => self.handle_incoming_server_msg(m).await,
+            Ok(ServerToMsg::FromClient(m)) => self.handle_incoming_client_msg(m).await,
+            Ok(ServerToMsg::FromServer(m)) => self.handle_incoming_server_msg(m).await,
+            Err(err) => panic!("Network failed {err:?}"),
         }
     }
 
@@ -135,7 +142,8 @@ impl OmniPaxosServer {
                 .append(command)
                 .expect("Append to Omnipaxos log failed"),
             ClientFromMsg::Read(client_id, command_id, key) => {
-                self.start_quorum_read(client_id, command_id, key).await
+                unimplemented!();
+                // self.start_quorum_read(client_id, command_id, key).await
             }
         };
     }
@@ -148,27 +156,27 @@ impl OmniPaxosServer {
         }
     }
 
-    // TODO: client sends to closest replica which might be the leader
-    async fn start_quorum_read(&mut self, client_id: ClientId, command_id: CommandId, key: String) {
-        // Get local info
-        let my_accepted_idx = self.omnipaxos.get_accepted_idx();
-        let read_quorum_size = self
-            .omnipaxos
-            .get_config()
-            .get_active_quorum()
-            .read_quorum_size;
-        self.quorum_reader.new_read(command_id, read_quorum, accepted_idx)
-
-        // Send quorum read to followers
-        let leader = self.omnipaxos.get_current_leader();
-        let followers = self.omnipaxos.get_peers().iter().filter(|id| match leader {
-            Some(leader_id) => **id != leader_id,
-            None => true,
-        });
-        for peer in followers {
-            let qread_msg = ClusterMessage::QuorumRead(*peer, command_id, key.clone());
-            let msg = ServerFromMsg::ToServer(qread_msg);
-            self.outgoing_messages.send(msg).await.unwrap();
-        }
-    }
+    // // TODO: client sends to closest replica which might be the leader
+    // async fn start_quorum_read(&mut self, client_id: ClientId, command_id: CommandId, key: String) {
+    //     // Get local info
+    //     let my_accepted_idx = self.omnipaxos.get_accepted_idx();
+    //     let read_quorum_size = self
+    //         .omnipaxos
+    //         .get_config()
+    //         .get_active_quorum()
+    //         .read_quorum_size;
+    //     self.quorum_reader.new_read(command_id, read_quorum, accepted_idx)
+    //
+    //     // Send quorum read to followers
+    //     let leader = self.omnipaxos.get_current_leader();
+    //     let followers = self.omnipaxos.get_peers().iter().filter(|id| match leader {
+    //         Some(leader_id) => **id != leader_id,
+    //         None => true,
+    //     });
+    //     for peer in followers {
+    //         let qread_msg = ClusterMessage::QuorumRead(*peer, command_id, key.clone());
+    //         let msg = ServerFromMsg::ToServer(qread_msg);
+    //         self.outgoing_messages.send(msg).await.unwrap();
+    //     }
+    // }
 }

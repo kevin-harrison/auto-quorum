@@ -83,6 +83,7 @@ impl Client {
         let command = Command {
             client_id: self.id,
             id: self.get_next_command_id(),
+            coordinator_id: NEAREST_SERVER,
             command: kv_command,
         };
         let request = ClientFromMsg::Append(command);
@@ -100,9 +101,12 @@ impl Client {
     }
 
     async fn get(&mut self, key: String) {
-        self.append(KVCommand::Get(key)).await;
+        unimplemented!();
+        // self.append(KVCommand::Get(key)).await;
     }
 }
+
+const NEAREST_SERVER: NodeId = 1;
 
 #[tokio::main]
 pub async fn main() {
@@ -116,7 +120,7 @@ pub async fn main() {
     //     let value = args[4].parse().expect("Couldn't parse value arg");
     //     append(node, key, value).await;
     // }
-    let mut client = Client::new(1).await;
+    let mut client = Client::new(NEAREST_SERVER).await;
     for i in 0..13 {
         client.put(i.to_string(), (i + 100).to_string()).await;
     }
