@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Error};
+use common::kv::Command;
 use futures::{SinkExt, Stream, StreamExt};
 use log::*;
 use omnipaxos::messages::ballot_leader_election::BLEMsg;
@@ -55,8 +56,8 @@ pub struct Network {
     max_client_id: Arc<Mutex<ClientId>>,
     connection_sink: Sender<NewConnection>,
     connection_source: Receiver<NewConnection>,
-    message_sink: Sender<ServerToMsg>,
-    message_source: Receiver<ServerToMsg>,
+    message_sink: Sender<Request>,
+    message_source: Receiver<Request>,
 }
 
 impl Network {
@@ -111,36 +112,38 @@ impl Network {
 
     async fn handle_incoming_connection(
         connection: TcpStream,
-        message_sink: Sender<ServerToMsg>,
+        message_sink: Sender<Request>,
         connection_sink: Sender<NewConnection>,
         max_client_id_handle: Arc<Mutex<ClientId>>,
     ) {
-        let (mut reader, mut writer) = wrap_stream(connection);
+        let (mut reader, writer) = wrap_stream(connection);
 
         // Identify connector's ID by handshake
         let first_message = reader.next().await;
-        match first_message {
-            Some(Ok(NetworkMessage::NodeHandshake(node_id))) => {
+        let client_id = match first_message {
+            Some(Ok(NetworkMessage::NodeRegister(node_id))) => {
                 debug!("Identified connection from node {node_id}");
                 let identified_connection = NewConnection::NodeConnection(node_id, writer);
                 connection_sink.send(identified_connection).await.unwrap();
+                None
             }
-            Some(Ok(NetworkMessage::ClientHandshake)) => {
+            Some(Ok(NetworkMessage::ClientRegister)) => {
                 let next_client_id = {
                     let mut max_client_id = max_client_id_handle.lock().unwrap();
                     *max_client_id += 1;
                     *max_client_id
                 };
                 debug!("Identified connection from client {next_client_id}");
-                let handshake_finish =
-                    NetworkMessage::ClientToMsg(ClientToMsg::AssignedID(next_client_id));
-                debug!("Assigning id to client {next_client_id}");
-                if let Err(err) = writer.send(handshake_finish).await {
-                    error!("Error sending ID to client {next_client_id}: {err}");
-                    return;
-                }
+                // let handshake_finish =
+                //     NetworkMessage::ClientToMsg(ClientToMsg::AssignedID(next_client_id));
+                // debug!("Assigning id to client {next_client_id}");
+                // if let Err(err) = writer.send(handshake_finish).await {
+                //     error!("Error sending ID to client {next_client_id}: {err}");
+                //     return;
+                // }
                 let identified_connection = NewConnection::ClientConnection(next_client_id, writer);
                 connection_sink.send(identified_connection).await.unwrap();
+                Some(next_client_id)
             }
             Some(Ok(msg)) => {
                 warn!("Received unknown message during handshake: {:?}", msg);
@@ -156,22 +159,37 @@ impl Network {
             }
         };
 
-        // Collect incoming messages
-        while let Some(frame) = reader.next().await {
-            match frame {
-                Ok(NetworkMessage::ServerToMsg(m)) => {
-                    trace!("Received: {m:?}");
-                    message_sink.send(m).await.unwrap();
+        match client_id {
+            Some(id) => {
+                while let Some(msg) = reader.next().await {
+                    match msg {
+                        Ok(NetworkMessage::ClientRequest(m)) => {
+                            debug!("Received request from client {id}: {m:?}");
+                            let request = Request::ClientRequest(id, m);
+                            message_sink.send(request).await.unwrap();
+                        }
+                        Ok(m) => warn!("Received unexpected message: {m:?}"),
+                        Err(err) => {
+                            error!("Error deserializing message: {:?}", err);
+                            break;
+                        }
+                    }
                 }
-                Ok(NetworkMessage::ClientFromMsg(m)) => {
-                    debug!("Received client request: {m:?}");
-                    let request = ServerToMsg::FromClient(m);
-                    message_sink.send(request).await.unwrap();
-                }
-                Ok(m) => warn!("Received unexpected message: {m:?}"),
-                Err(err) => {
-                    error!("Error deserializing message: {:?}", err);
-                    break;
+            }
+            None => {
+                while let Some(msg) = reader.next().await {
+                    match msg {
+                        Ok(NetworkMessage::OmniPaxosMessage(m)) => {
+                            trace!("Received: {m:?}");
+                            let request = Request::OmniPaxosMessage(m);
+                            message_sink.send(request).await.unwrap();
+                        }
+                        Ok(m) => warn!("Received unexpected message: {m:?}"),
+                        Err(err) => {
+                            error!("Error deserializing message: {:?}", err);
+                            break;
+                        }
+                    }
                 }
             }
         }
@@ -179,7 +197,7 @@ impl Network {
 
     async fn handle_connection_to_node(
         connection: TcpStream,
-        message_sink: Sender<ServerToMsg>,
+        message_sink: Sender<Request>,
         connection_sink: Sender<NewConnection>,
         my_id: NodeId,
         to: NodeId,
@@ -187,7 +205,7 @@ impl Network {
         let (mut reader, mut writer) = wrap_stream(connection);
 
         // Send handshake
-        let handshake = NetworkMessage::NodeHandshake(my_id);
+        let handshake = NetworkMessage::NodeRegister(my_id);
         debug!("Sending handshake to {to}");
         if let Err(err) = writer.send(handshake).await {
             error!("Error sending handshake to {to}: {err}");
@@ -199,9 +217,10 @@ impl Network {
         // Collect incoming messages
         while let Some(msg) = reader.next().await {
             match msg {
-                Ok(NetworkMessage::ServerToMsg(m)) => {
+                Ok(NetworkMessage::OmniPaxosMessage(m)) => {
                     trace!("Received: {m:?}");
-                    message_sink.send(m).await.unwrap();
+                    let request = Request::OmniPaxosMessage(m);
+                    message_sink.send(request).await.unwrap();
                 }
                 Ok(m) => warn!("Received unexpected message: {m:?}"),
                 Err(err) => {
@@ -223,22 +242,20 @@ impl Network {
         };
     }
 
-    pub async fn send(&mut self, message: ServerFromMsg) {
+    pub async fn send(&mut self, message: Response) {
         match message {
-            ServerFromMsg::ToClient(client_id, client_response) => {
-                self.send_to_client(client_id, client_response).await
-            }
-            ServerFromMsg::ToServer(server_to_server_msg) => {
-                self.send_to_cluster(server_to_server_msg).await
-            }
+            Response::ClientResponse(client_id, msg) =>
+                self.send_to_client(client_id, msg).await,
+            Response::OmniPaxosMessage(msg) =>
+                self.send_to_cluster(msg).await,
         }
     }
 
-    async fn send_to_cluster(&mut self, msg: ClusterMessage) {
+    async fn send_to_cluster(&mut self, msg: OmniPaxosMessage<Command>) {
         let to = msg.get_receiver();
         if let Some(writer) = self.cluster_connections.get_mut(&to) {
             trace!("Sending to node {to}: {msg:?}");
-            let net_msg = NetworkMessage::ServerToMsg(ServerToMsg::FromServer(msg));
+            let net_msg = NetworkMessage::OmniPaxosMessage(msg);
             if let Err(err) = writer.send(net_msg).await {
                 warn!("Couldn't send message to node {to}: {err}");
                 warn!("Removing connection to node {to}");
@@ -247,7 +264,7 @@ impl Network {
         } else {
             warn!("Not connected to node {to}");
             // If HeartbeatRequest msg is what failed, try to reconnect to node.
-            if let ClusterMessage::OmniPaxosMessage(OmniPaxosMessage::BLE(m)) = msg {
+            if let OmniPaxosMessage::BLE(m) = msg {
                 if let BLEMsg::HeartbeatRequest(_) = m.msg {
                     if m.to == to {
                         self.connect_to_node(to);
@@ -257,10 +274,10 @@ impl Network {
         }
     }
 
-    async fn send_to_client(&mut self, to: ClientId, msg: ClientToMsg) {
+    async fn send_to_client(&mut self, to: ClientId, msg: ClientResponse) {
         if let Some(writer) = self.client_connections.get_mut(&to) {
             debug!("Responding to client {to}: {msg:?}");
-            let net_msg = NetworkMessage::ClientToMsg(msg);
+            let net_msg = NetworkMessage::ClientResponse(msg);
             if let Err(err) = writer.send(net_msg).await {
                 warn!("Couldn't send message to client {to}: {err}");
                 warn!("Removing connection to client {to}");
@@ -279,7 +296,7 @@ pub enum NetworkError {
 }
 
 impl Stream for Network {
-    type Item = Result<ServerToMsg, NetworkError>;
+    type Item = Result<Request, NetworkError>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         // Poll new incoming connection

@@ -21,7 +21,6 @@ fn get_node_addr(node: NodeId) -> SocketAddr {
 }
 
 struct Client {
-    id: ClientId,
     command_id: CommandId,
     server: ServerConnection,
 }
@@ -35,20 +34,20 @@ impl Client {
         let length_delimited = CodecFramed::new(tcp_stream, LengthDelimitedCodec::new());
         let mut framed: ServerConnection = Framed::new(length_delimited, Cbor::default());
 
-        // Get client id
-        match framed.send(NetworkMessage::ClientHandshake).await {
+        // Register with network
+        match framed.send(NetworkMessage::ClientRegister).await {
             Ok(_) => println!("Requesting client ID"),
             Err(err) => println!("Failed to send message: {}", err),
         }
-        let id = match framed.next().await {
-            Some(Ok(NetworkMessage::ClientToMsg(ClientToMsg::AssignedID(id)))) => id,
-            Some(Ok(m)) => panic!("Unexpected message: {m:?}"),
-            Some(Err(err)) => panic!("Error deserializing: {err}"),
-            None => panic!("Connection to server lost."),
-        };
-        println!("Assigned ID: {id}");
+        // // Get assigned ID
+        // let id = match framed.next().await {
+        //     Some(Ok(NetworkMessage::ClientToMsg(ClientToMsg::AssignedID(id)))) => id,
+        //     Some(Ok(m)) => panic!("Unexpected message: {m:?}"),
+        //     Some(Err(err)) => panic!("Error deserializing: {err}"),
+        //     None => panic!("Connection to server lost."),
+        // };
+        // println!("Assigned ID: {id}");
         Self {
-            id,
             command_id: 0,
             server: framed,
         }
@@ -59,20 +58,20 @@ impl Client {
         self.command_id
     }
 
-    async fn send_request(&mut self, request: ClientFromMsg) {
+    async fn send_request(&mut self, request: ClientRequest) {
         println!("Sending request: {request:?}");
         if let Err(err) = self
             .server
-            .send(NetworkMessage::ClientFromMsg(request))
+            .send(NetworkMessage::ClientRequest(request))
             .await
         {
             println!("Failed to send message: {}", err);
         }
     }
 
-    async fn get_response(&mut self) -> ClientToMsg {
+    async fn get_response(&mut self) -> ClientResponse {
         match self.server.next().await {
-            Some(Ok(NetworkMessage::ClientToMsg(response))) => response,
+            Some(Ok(NetworkMessage::ClientResponse(response))) => response,
             Some(Ok(m)) => panic!("Unexpected message: {m:?}"),
             Some(Err(err)) => panic!("Error deserializing: {err}"),
             None => panic!("Connection to server lost."),
@@ -81,13 +80,10 @@ impl Client {
 
     async fn append(&mut self, kv_command: KVCommand) {
         let command = Command {
-            client_id: self.id,
             id: self.get_next_command_id(),
-            coordinator_id: NEAREST_SERVER,
             command: kv_command,
         };
-        let request = ClientFromMsg::Append(command);
-        self.send_request(request).await;
+        self.send_request(ClientRequest::Append(command)).await;
         let response = self.get_response().await;
         println!("Got response: {response:?}");
     }
@@ -101,8 +97,7 @@ impl Client {
     }
 
     async fn get(&mut self, key: String) {
-        unimplemented!();
-        // self.append(KVCommand::Get(key)).await;
+        self.append(KVCommand::Get(key)).await;
     }
 }
 

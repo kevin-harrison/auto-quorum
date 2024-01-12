@@ -8,8 +8,6 @@ pub type ClientId = u64;
 #[derive(Debug, Clone, Entry, Serialize, Deserialize)]
 pub struct Command {
     pub id: CommandId,
-    pub client_id: ClientId,
-    pub coordinator_id: NodeId,
     pub command: KVCommand,
 }
 
@@ -17,7 +15,7 @@ pub struct Command {
 pub enum KVCommand {
     Put(String, String),
     Delete(String),
-    // Get(String),
+    Get(String),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -40,7 +38,8 @@ impl Snapshot<Command> for KVSnapshot {
                         // key was not in the snapshot
                         deleted_keys.push(key.clone());
                     }
-                } // KVCommand::Get(_) => (),
+                }
+                KVCommand::Get(_) => (),
             }
         }
         // remove keys that were put back

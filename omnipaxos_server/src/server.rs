@@ -8,19 +8,18 @@ use omnipaxos::{
 };
 use omnipaxos_storage::memory_storage::MemoryStorage;
 
-use crate::{database::Database, network::{Network, NetworkError}, read::QuorumReader};
+use crate::{database::Database, network::{Network, NetworkError}};
 use common::{kv::*, messages::*};
 
 type OmniPaxosInstance = OmniPaxos<Command, MemoryStorage<Command>>;
 
 pub struct OmniPaxosServer {
-    id: NodeId,
     database: Database,
     network: Network,
     omnipaxos: OmniPaxosInstance,
     current_decided_idx: usize,
     latencies: Vec<Option<u128>>,
-    quorum_reader: QuorumReader,
+    pending_responses: HashMap<CommandId, ClientId>,
 }
 
 impl OmniPaxosServer {
@@ -38,13 +37,12 @@ impl OmniPaxosServer {
         let storage: MemoryStorage<Command> = MemoryStorage::default();
         let omnipaxos = omnipaxos_config.build(storage).unwrap();
         OmniPaxosServer {
-            id,
             database: Database::new(),
             network,
             omnipaxos,
             current_decided_idx: 0,
             latencies: vec![None; cluster_size],
-            quorum_reader: QuorumReader::new(),
+            pending_responses: HashMap::new(),
         }
     }
 
@@ -103,16 +101,13 @@ impl OmniPaxosServer {
         });
         // TODO: batching responses possible here.
         for command in commands {
-            match command.command {
-                KVCommand::Put(k, v) => self.database.put(k, v),
-                KVCommand::Delete(k) => self.database.delete(&k),
-            };
-            if command.coordinator_id == self.id {
-                error!("SENDING REPLY TO CLIENT");
-                let response = ClientToMsg::Write(command.id);
-                self.network
-                    .send(ServerFromMsg::ToClient(command.client_id, response))
-                    .await;
+            let read = self.database.handle_command(command.command);
+            if let Some(waiting_client) = self.pending_responses.get(&command.id) {
+                let response = match read {
+                    Some(read_result) => ClientResponse::Read(command.id, read_result),
+                    None => ClientResponse::Write(command.id),
+                };
+                self.network.send(Response::ClientResponse(*waiting_client, response)).await;
             }
         }
     }
@@ -120,40 +115,30 @@ impl OmniPaxosServer {
     async fn send_outgoing_msgs(&mut self) {
         let messages = self.omnipaxos.outgoing_messages();
         for msg in messages {
-            let cluster_msg = ClusterMessage::OmniPaxosMessage(msg);
-            self.network
-                .send(ServerFromMsg::ToServer(cluster_msg))
-                .await;
+            let response = Response::OmniPaxosMessage(msg);
+            self.network.send(response).await;
         }
     }
 
-    async fn handle_incoming_msg(&mut self, msg: Result<ServerToMsg, NetworkError>) { 
+    async fn handle_incoming_msg(&mut self, msg: Result<Request, NetworkError>) { 
         match msg {
-            Ok(ServerToMsg::FromClient(m)) => self.handle_incoming_client_msg(m).await,
-            Ok(ServerToMsg::FromServer(m)) => self.handle_incoming_server_msg(m).await,
+            Ok(Request::ClientRequest(client_id, request)) => self.handle_incoming_client_msg(client_id, request).await,
+            Ok(Request::OmniPaxosMessage(m)) => self.omnipaxos.handle_incoming(m),
             Err(err) => panic!("Network failed {err:?}"),
         }
     }
 
-    async fn handle_incoming_client_msg(&mut self, msg: ClientFromMsg) {
-        match msg {
-            ClientFromMsg::Append(command) => self
-                .omnipaxos
-                .append(command)
-                .expect("Append to Omnipaxos log failed"),
-            ClientFromMsg::Read(client_id, command_id, key) => {
-                unimplemented!();
-                // self.start_quorum_read(client_id, command_id, key).await
+    async fn handle_incoming_client_msg(&mut self, from: ClientId, request: ClientRequest) {
+        match request {
+            ClientRequest::Append(command) => {
+                let command_id = command.id;
+                self
+                    .omnipaxos
+                    .append(command)
+                    .expect("Append to Omnipaxos log failed");
+                self.pending_responses.insert(command_id, from);
             }
         };
-    }
-
-    async fn handle_incoming_server_msg(&mut self, msg: ClusterMessage) {
-        match msg {
-            ClusterMessage::OmniPaxosMessage(m) => self.omnipaxos.handle_incoming(m),
-            ClusterMessage::QuorumRead(_, _, _) => unimplemented!(),
-            ClusterMessage::QuorumReadResponse(_, _, _, _) => unimplemented!(),
-        }
     }
 
     // // TODO: client sends to closest replica which might be the leader
