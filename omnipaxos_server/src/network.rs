@@ -19,6 +19,11 @@ use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
 
 use common::{kv::ClientId, messages::*};
 
+enum ConnectionId {
+    ClientConnection(ClientId),
+    ServerConnection(NodeId),
+}
+
 type NetworkSource = Framed<
     FramedRead<OwnedReadHalf, LengthDelimitedCodec>,
     NetworkMessage,
@@ -56,8 +61,8 @@ pub struct Network {
     max_client_id: Arc<Mutex<ClientId>>,
     connection_sink: Sender<NewConnection>,
     connection_source: Receiver<NewConnection>,
-    message_sink: Sender<Request>,
-    message_source: Receiver<Request>,
+    message_sink: Sender<Incoming>,
+    message_source: Receiver<Incoming>,
 }
 
 impl Network {
@@ -112,7 +117,7 @@ impl Network {
 
     async fn handle_incoming_connection(
         connection: TcpStream,
-        message_sink: Sender<Request>,
+        message_sink: Sender<Incoming>,
         connection_sink: Sender<NewConnection>,
         max_client_id_handle: Arc<Mutex<ClientId>>,
     ) {
@@ -120,12 +125,12 @@ impl Network {
 
         // Identify connector's ID by handshake
         let first_message = reader.next().await;
-        let client_id = match first_message {
+        let connection_id = match first_message {
             Some(Ok(NetworkMessage::NodeRegister(node_id))) => {
                 debug!("Identified connection from node {node_id}");
                 let identified_connection = NewConnection::NodeConnection(node_id, writer);
                 connection_sink.send(identified_connection).await.unwrap();
-                None
+                ConnectionId::ServerConnection(node_id)
             }
             Some(Ok(NetworkMessage::ClientRegister)) => {
                 let next_client_id = {
@@ -143,7 +148,7 @@ impl Network {
                 // }
                 let identified_connection = NewConnection::ClientConnection(next_client_id, writer);
                 connection_sink.send(identified_connection).await.unwrap();
-                Some(next_client_id)
+                ConnectionId::ClientConnection(next_client_id)
             }
             Some(Ok(msg)) => {
                 warn!("Received unknown message during handshake: {:?}", msg);
@@ -159,13 +164,13 @@ impl Network {
             }
         };
 
-        match client_id {
-            Some(id) => {
+        match connection_id {
+            ConnectionId::ClientConnection(id) => {
                 while let Some(msg) = reader.next().await {
                     match msg {
                         Ok(NetworkMessage::ClientRequest(m)) => {
                             debug!("Received request from client {id}: {m:?}");
-                            let request = Request::ClientRequest(id, m);
+                            let request = Incoming::ClientRequest(id, m);
                             message_sink.send(request).await.unwrap();
                         }
                         Ok(m) => warn!("Received unexpected message: {m:?}"),
@@ -176,12 +181,12 @@ impl Network {
                     }
                 }
             }
-            None => {
+            ConnectionId::ServerConnection(id) => {
                 while let Some(msg) = reader.next().await {
                     match msg {
-                        Ok(NetworkMessage::OmniPaxosMessage(m)) => {
+                        Ok(NetworkMessage::ClusterMessage(m)) => {
                             trace!("Received: {m:?}");
-                            let request = Request::OmniPaxosMessage(m);
+                            let request = Incoming::ClusterMessage(id, m);
                             message_sink.send(request).await.unwrap();
                         }
                         Ok(m) => warn!("Received unexpected message: {m:?}"),
@@ -197,7 +202,7 @@ impl Network {
 
     async fn handle_connection_to_node(
         connection: TcpStream,
-        message_sink: Sender<Request>,
+        message_sink: Sender<Incoming>,
         connection_sink: Sender<NewConnection>,
         my_id: NodeId,
         to: NodeId,
@@ -217,9 +222,9 @@ impl Network {
         // Collect incoming messages
         while let Some(msg) = reader.next().await {
             match msg {
-                Ok(NetworkMessage::OmniPaxosMessage(m)) => {
+                Ok(NetworkMessage::ClusterMessage(m)) => {
                     trace!("Received: {m:?}");
-                    let request = Request::OmniPaxosMessage(m);
+                    let request = Incoming::ClusterMessage(to, m);
                     message_sink.send(request).await.unwrap();
                 }
                 Ok(m) => warn!("Received unexpected message: {m:?}"),
@@ -242,21 +247,19 @@ impl Network {
         };
     }
 
-    pub async fn send(&mut self, message: Response) {
+    pub async fn send(&mut self, message: Outgoing) {
         match message {
-            Response::ClientResponse(client_id, msg) =>
+            Outgoing::ClientResponse(client_id, msg) =>
                 self.send_to_client(client_id, msg).await,
-            Response::OmniPaxosMessage(msg) =>
-                self.send_to_cluster(msg).await,
+            Outgoing::ClusterMessage(server_id, msg) =>
+                self.send_to_cluster(server_id, msg).await,
         }
     }
 
-    async fn send_to_cluster(&mut self, msg: OmniPaxosMessage<Command>) {
-        let to = msg.get_receiver();
+    async fn send_to_cluster(&mut self, to: NodeId, msg: ClusterMessage) {
         if let Some(writer) = self.cluster_connections.get_mut(&to) {
             trace!("Sending to node {to}: {msg:?}");
-            let net_msg = NetworkMessage::OmniPaxosMessage(msg);
-            if let Err(err) = writer.send(net_msg).await {
+            if let Err(err) = writer.send(NetworkMessage::ClusterMessage(msg)).await {
                 warn!("Couldn't send message to node {to}: {err}");
                 warn!("Removing connection to node {to}");
                 self.cluster_connections.remove(&to);
@@ -264,7 +267,7 @@ impl Network {
         } else {
             warn!("Not connected to node {to}");
             // If HeartbeatRequest msg is what failed, try to reconnect to node.
-            if let OmniPaxosMessage::BLE(m) = msg {
+            if let ClusterMessage::OmniPaxosMessage(OmniPaxosMessage::BLE(m)) = msg {
                 if let BLEMsg::HeartbeatRequest(_) = m.msg {
                     if m.to == to {
                         self.connect_to_node(to);
@@ -296,7 +299,7 @@ pub enum NetworkError {
 }
 
 impl Stream for Network {
-    type Item = Result<Request, NetworkError>;
+    type Item = Result<Incoming, NetworkError>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         // Poll new incoming connection
@@ -332,6 +335,8 @@ impl Stream for Network {
             }
         }
         // Nothing to yield yet
+        // Note: don't need to call waker here because previous poll_recv and poll_accept will
+        // handle scheduling the wake up.
         return Poll::Pending;
     }
 }

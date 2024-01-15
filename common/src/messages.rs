@@ -1,38 +1,60 @@
-use omnipaxos::{messages::Message as OmniPaxosMessage, util::NodeId};
+use omnipaxos::{messages::Message as OmniPaxosMessage, util::NodeId, storage::ReadQuorumConfig};
 use serde::{Deserialize, Serialize};
 
-use crate::kv::{ClientId, Command, CommandId};
+use crate::kv::{ClientId, Command, CommandId, KVCommand};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum NetworkMessage {
     NodeRegister(NodeId),
+    ClusterMessage(ClusterMessage),
     ClientRegister,
-    OmniPaxosMessage(OmniPaxosMessage<Command>),
     ClientRequest(ClientRequest),
     ClientResponse(ClientResponse),
 }
 
-// next
-#[derive(Clone, Debug)]
-pub enum Request {
-     OmniPaxosMessage(OmniPaxosMessage<Command>),
-     ClientRequest(ClientId, ClientRequest),
-}
-
-// send
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub enum Response {
-     OmniPaxosMessage(OmniPaxosMessage<Command>),
-     ClientResponse(ClientId, ClientResponse)
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ClientRequest {
-     Append(Command),
+    Append(CommandId, KVCommand),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ClientResponse {
-     Write(CommandId),
-     Read(CommandId, Option<String>)
+    Write(CommandId),
+    Read(CommandId, Option<String>)
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum ClusterMessage {
+    OmniPaxosMessage(OmniPaxosMessage<Command>),
+    QuorumReadRequest(QuorumReadRequest),
+    QuorumReadResponse(QuorumReadResponse),
+}
+
+// next
+#[derive(Clone, Debug)]
+pub enum Incoming {
+    ClientRequest(ClientId, ClientRequest),
+    ClusterMessage(NodeId, ClusterMessage),
+}
+
+// send
+#[derive(Clone, Debug)]
+pub enum Outgoing {
+    ClientResponse(ClientId, ClientResponse),
+    ClusterMessage(NodeId, ClusterMessage),
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct QuorumReadRequest {
+    // pub from: NodeId,
+    pub client_id: ClientId,
+    pub command_id: CommandId,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct QuorumReadResponse {
+    pub client_id: ClientId,
+    pub command_id: CommandId,
+    pub read_quorum_config: ReadQuorumConfig,
+    pub accepted_idx: usize,
 }

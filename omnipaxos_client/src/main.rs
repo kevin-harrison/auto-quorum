@@ -1,5 +1,5 @@
 use futures::{SinkExt, StreamExt};
-use std::{env, net::SocketAddr};
+use std::{env, net::SocketAddr, time::Duration};
 use tokio::net::TcpStream;
 use tokio_serde::{formats::Cbor, Framed};
 use tokio_util::codec::{Framed as CodecFramed, LengthDelimitedCodec};
@@ -79,11 +79,8 @@ impl Client {
     }
 
     async fn append(&mut self, kv_command: KVCommand) {
-        let command = Command {
-            id: self.get_next_command_id(),
-            command: kv_command,
-        };
-        self.send_request(ClientRequest::Append(command)).await;
+        let request = ClientRequest::Append(self.get_next_command_id(), kv_command);
+        self.send_request(request).await;
         let response = self.get_response().await;
         println!("Got response: {response:?}");
     }
@@ -116,7 +113,17 @@ pub async fn main() {
     //     append(node, key, value).await;
     // }
     let mut client = Client::new(NEAREST_SERVER).await;
+    let mut client2 = Client::new(NEAREST_SERVER).await;
+    let delete = async {
+        tokio::time::sleep(Duration::from_millis(5000)).await;
+        client2.delete(5.to_string()).await;
+    };
     for i in 0..13 {
         client.put(i.to_string(), (i + 100).to_string()).await;
     }
+    tokio::join!(
+        client.get(5.to_string()),
+        delete
+        );
+    client.get(5.to_string()).await;
 }

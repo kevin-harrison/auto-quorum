@@ -5,6 +5,7 @@ use omnipaxos::{util::NodeId, ClusterConfig, OmniPaxosConfig, ServerConfig};
 mod database;
 mod network;
 mod server;
+mod read;
 
 #[tokio::main]
 pub async fn main() {

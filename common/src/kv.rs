@@ -7,8 +7,10 @@ pub type ClientId = u64;
 
 #[derive(Debug, Clone, Entry, Serialize, Deserialize)]
 pub struct Command {
+    pub client_id: ClientId,
+    pub coordinator_id: NodeId,
     pub id: CommandId,
-    pub command: KVCommand,
+    pub kv_cmd: KVCommand,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -29,7 +31,7 @@ impl Snapshot<Command> for KVSnapshot {
         let mut snapshotted = HashMap::new();
         let mut deleted_keys: Vec<String> = Vec::new();
         for e in entries {
-            match &e.command {
+            match &e.kv_cmd {
                 KVCommand::Put(key, value) => {
                     snapshotted.insert(key.clone(), value.clone());
                 }
