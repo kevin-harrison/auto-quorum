@@ -22,3 +22,6 @@ Cargo.lock
 logs/
 config/*/*.conf
 !config/*/c1.conf
+
+# Secrets
+service-account-key.json

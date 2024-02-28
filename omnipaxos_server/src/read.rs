@@ -1,11 +1,13 @@
-use std::collections::{HashMap, VecDeque};
 use log::debug;
 use omnipaxos::{storage::ReadQuorumConfig, util::NodeId};
+use std::collections::{HashMap, VecDeque};
 
-use common::{kv::{ClientId, CommandId, KVCommand, Command}, messages::QuorumReadResponse};
+use common::{
+    kv::{ClientId, Command, CommandId, KVCommand},
+    messages::QuorumReadResponse,
+};
 
 type CommandKey = (ClientId, CommandId);
-
 
 struct PendingRead {
     read_command: KVCommand,
@@ -29,20 +31,36 @@ pub struct QuorumReader {
 
 impl QuorumReader {
     pub fn new(id: NodeId) -> Self {
-        Self { id, pending_reads: HashMap::new(), ready_reads: VecDeque::new() }
+        Self {
+            id,
+            pending_reads: HashMap::new(),
+            ready_reads: VecDeque::new(),
+        }
     }
 
-    pub fn new_read(&mut self, client_id: ClientId, command_id: CommandId, read_command: KVCommand, read_quorum_config: ReadQuorumConfig, accepted_idx: usize) {
+    pub fn new_read(
+        &mut self,
+        client_id: ClientId,
+        command_id: CommandId,
+        read_command: KVCommand,
+        read_quorum_config: ReadQuorumConfig,
+        accepted_idx: usize,
+    ) {
         let pending_read = PendingRead {
             read_command,
             num_replies: 1,
             read_quorum_config,
             max_accepted_idx: accepted_idx,
         };
-        self.pending_reads.insert((client_id, command_id), pending_read);
+        self.pending_reads
+            .insert((client_id, command_id), pending_read);
     }
 
-    pub fn handle_response(&mut self, response: QuorumReadResponse, current_decided_idx: usize) -> Option<Command> {
+    pub fn handle_response(
+        &mut self,
+        response: QuorumReadResponse,
+        current_decided_idx: usize,
+    ) -> Option<Command> {
         let command_key = (response.client_id, response.command_id);
         let read_is_ready = if let Some(pending_read) = self.pending_reads.get_mut(&command_key) {
             if response.read_quorum_config > pending_read.read_quorum_config {

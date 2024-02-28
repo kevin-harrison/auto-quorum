@@ -7,4 +7,6 @@ edition = "2021"
 
 [dependencies]
 omnipaxos = { git = "https://github.com/kevin-harrison/omnipaxos.git", branch = "auto-quorum", features = ["serde"] }
-serde = "1.0.194"
+serde = { version = "1.0.194", features = ["derive"] }
+# TODO: remove
+tokio = { version = "1.35.1", features = ["time"] }

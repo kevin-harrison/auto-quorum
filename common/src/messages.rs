@@ -1,4 +1,4 @@
-use omnipaxos::{messages::Message as OmniPaxosMessage, util::NodeId, storage::ReadQuorumConfig};
+use omnipaxos::{messages::Message as OmniPaxosMessage, storage::ReadQuorumConfig, util::NodeId};
 use serde::{Deserialize, Serialize};
 
 use crate::kv::{ClientId, Command, CommandId, KVCommand};
@@ -20,7 +20,7 @@ pub enum ClientRequest {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ClientResponse {
     Write(CommandId),
-    Read(CommandId, Option<String>)
+    Read(CommandId, Option<String>),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -28,6 +28,8 @@ pub enum ClusterMessage {
     OmniPaxosMessage(OmniPaxosMessage<Command>),
     QuorumReadRequest(QuorumReadRequest),
     QuorumReadResponse(QuorumReadResponse),
+    // Reads, writes
+    WorkloadUpdate(u64, u64),
 }
 
 // next

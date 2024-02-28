@@ -1,5 +1,4 @@
 use anyhow::Error;
-use common::kv::Command;
 use futures::{SinkExt, Stream, StreamExt};
 use log::*;
 use omnipaxos::messages::ballot_leader_election::BLEMsg;
@@ -249,10 +248,8 @@ impl Network {
 
     pub async fn send(&mut self, message: Outgoing) {
         match message {
-            Outgoing::ClientResponse(client_id, msg) =>
-                self.send_to_client(client_id, msg).await,
-            Outgoing::ClusterMessage(server_id, msg) =>
-                self.send_to_cluster(server_id, msg).await,
+            Outgoing::ClientResponse(client_id, msg) => self.send_to_client(client_id, msg).await,
+            Outgoing::ClusterMessage(server_id, msg) => self.send_to_cluster(server_id, msg).await,
         }
     }
 
@@ -292,7 +289,7 @@ impl Network {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum NetworkError {
     SocketListenerFailure,
     InternalChannelFailure,

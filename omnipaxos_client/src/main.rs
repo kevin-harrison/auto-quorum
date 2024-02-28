@@ -1,8 +1,16 @@
 use futures::{SinkExt, StreamExt};
-use std::{env, net::SocketAddr, time::Duration};
+use std::time::Instant;
+use std::{
+    env,
+    io::Error,
+    net::{SocketAddr, ToSocketAddrs},
+    time::Duration,
+};
 use tokio::net::TcpStream;
 use tokio_serde::{formats::Cbor, Framed};
 use tokio_util::codec::{Framed as CodecFramed, LengthDelimitedCodec};
+#[macro_use]
+extern crate lazy_static;
 
 use common::{kv::*, messages::*};
 
@@ -15,9 +23,37 @@ type ServerConnection = Framed<
     Cbor<NetworkMessage, NetworkMessage>,
 >;
 
-fn get_node_addr(node: NodeId) -> SocketAddr {
-    let port = 8000 + node as u16;
-    SocketAddr::from(([127, 0, 0, 1], port))
+lazy_static! {
+    pub static ref NEAREST_SERVER: NodeId = if let Ok(var) = env::var("SERVER_ID") {
+        let x = var.parse().expect("Server PIDs must be u64");
+        if x == 0 {
+            panic!("Server PIDs cannot be 0")
+        } else {
+            x
+        }
+    } else {
+        panic!("missing server PID")
+    };
+    pub static ref LOCAL_CLUSTER_DEPLOYMENT: bool = if let Ok(var) = env::var("LOCAL") {
+        match var.trim().to_lowercase().as_str() {
+            "true" | "t" | "yes" | "y" | "1" => true,
+            "false" | "f" | "no" | "n" | "0" => false,
+            _ => panic!("Invalid LOCAL argument"),
+        }
+    } else {
+        false
+    };
+}
+
+fn get_node_addr(node: NodeId) -> Result<SocketAddr, Error> {
+    let dns_name = if *LOCAL_CLUSTER_DEPLOYMENT {
+        // format!("s{node}:800{node}")
+        format!("localhost:800{node}")
+    } else {
+        format!("server-{node}.internal.zone.:800{node}")
+    };
+    let address = dns_name.to_socket_addrs()?.next().unwrap();
+    Ok(address)
 }
 
 struct Client {
@@ -27,10 +63,12 @@ struct Client {
 
 impl Client {
     async fn new(server_id: NodeId) -> Self {
-        let address = get_node_addr(server_id);
+        let address = get_node_addr(server_id).expect("Couldn't resolve server IP");
+        println!("Trying to connect to {address:?}");
         let tcp_stream = TcpStream::connect(address)
             .await
             .expect("Couldn't connect to server");
+        tcp_stream.set_nodelay(true).unwrap();
         let length_delimited = CodecFramed::new(tcp_stream, LengthDelimitedCodec::new());
         let mut framed: ServerConnection = Framed::new(length_delimited, Cbor::default());
 
@@ -86,44 +124,38 @@ impl Client {
     }
 
     async fn put(&mut self, key: String, value: String) {
+        let start = Instant::now();
         self.append(KVCommand::Put(key, value)).await;
+        let end = Instant::now();
+        println!("Put latency: {:?}", end - start);
     }
 
     async fn delete(&mut self, key: String) {
+        let start = Instant::now();
         self.append(KVCommand::Delete(key)).await;
+        let end = Instant::now();
+        println!("Delete latency: {:?}", end - start);
     }
 
     async fn get(&mut self, key: String) {
+        let start = Instant::now();
         self.append(KVCommand::Get(key)).await;
+        let end = Instant::now();
+        println!("Get latency: {:?}", end - start);
     }
 }
 
-const NEAREST_SERVER: NodeId = 1;
-
 #[tokio::main]
 pub async fn main() {
-    // // Parse args
-    // let args: Vec<String> = env::args().collect();
-    // let command = args[1].clone();
-    //
-    // if command == "append" {
-    //     let node: NodeId = args[2].parse().expect("Couldn't parse node ID arg");
-    //     let key = args[3].clone();
-    //     let value = args[4].parse().expect("Couldn't parse value arg");
-    //     append(node, key, value).await;
-    // }
-    let mut client = Client::new(NEAREST_SERVER).await;
-    let mut client2 = Client::new(NEAREST_SERVER).await;
+    let mut client = Client::new(*NEAREST_SERVER).await;
+    let mut client2 = Client::new(*NEAREST_SERVER).await;
     let delete = async {
-        tokio::time::sleep(Duration::from_millis(5000)).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
         client2.delete(5.to_string()).await;
     };
-    for i in 0..13 {
+    for i in 0..11 {
         client.put(i.to_string(), (i + 100).to_string()).await;
     }
-    tokio::join!(
-        client.get(5.to_string()),
-        delete
-        );
+    tokio::join!(client.get(5.to_string()), delete);
     client.get(5.to_string()).await;
 }
