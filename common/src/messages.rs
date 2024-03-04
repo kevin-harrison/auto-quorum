@@ -6,28 +6,28 @@ use crate::kv::{ClientId, Command, CommandId, KVCommand};
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum NetworkMessage {
     NodeRegister(NodeId),
-    ClusterMessage(ClusterMessage),
     ClientRegister,
-    ClientRequest(ClientRequest),
-    ClientResponse(ClientResponse),
+    ClusterMessage(ClusterMessage),
+    ClientMessage(ClientMessage),
+    ServerMessage(ServerMessage),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub enum ClientRequest {
+pub enum ClientMessage {
     Append(CommandId, KVCommand),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub enum ClientResponse {
+pub enum ServerMessage {
     Write(CommandId),
     Read(CommandId, Option<String>),
 }
 
-impl ClientResponse {
+impl ServerMessage {
     pub fn command_id(&self) -> CommandId {
         match self {
-            ClientResponse::Write(id) => *id,
-            ClientResponse::Read(id, _) => *id,
+            ServerMessage::Write(id) => *id,
+            ServerMessage::Read(id, _) => *id,
         }
     }
 }
@@ -45,14 +45,14 @@ pub enum ClusterMessage {
 // next
 #[derive(Clone, Debug)]
 pub enum Incoming {
-    ClientRequest(ClientId, ClientRequest),
+    ClientMessage(ClientId, ClientMessage),
     ClusterMessage(NodeId, ClusterMessage),
 }
 
 // send
 #[derive(Clone, Debug)]
 pub enum Outgoing {
-    ClientResponse(ClientId, ClientResponse),
+    ServerMessage(ClientId, ServerMessage),
     ClusterMessage(NodeId, ClusterMessage),
 }
 

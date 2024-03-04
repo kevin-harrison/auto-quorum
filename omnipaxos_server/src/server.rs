@@ -177,11 +177,11 @@ impl OmniPaxosServer {
             // TODO: should leader respond here since it has less latency for decided
             if command.coordinator_id == self.id {
                 let response = match read {
-                    Some(read_result) => ClientResponse::Read(command.id, read_result),
-                    None => ClientResponse::Write(command.id),
+                    Some(read_result) => ServerMessage::Read(command.id, read_result),
+                    None => ServerMessage::Write(command.id),
                 };
                 self.network
-                    .send(Outgoing::ClientResponse(command.client_id, response))
+                    .send(Outgoing::ServerMessage(command.client_id, response))
                     .await;
             }
         }
@@ -200,7 +200,7 @@ impl OmniPaxosServer {
 
     async fn handle_incoming_msg(&mut self, msg: Incoming) {
         match msg {
-            Incoming::ClientRequest(from, request) => {
+            Incoming::ClientMessage(from, request) => {
                 self.handle_client_request(from, request).await
             }
             Incoming::ClusterMessage(_from, ClusterMessage::OmniPaxosMessage(m)) => {
@@ -221,9 +221,9 @@ impl OmniPaxosServer {
         }
     }
 
-    async fn handle_client_request(&mut self, from: ClientId, request: ClientRequest) {
+    async fn handle_client_request(&mut self, from: ClientId, request: ClientMessage) {
         match request {
-            ClientRequest::Append(command_id, kv_command) => {
+            ClientMessage::Append(command_id, kv_command) => {
                 let read_strat = self.strategy.read_strat[self.id as usize - 1];
                 match (&kv_command, read_strat) {
                     (KVCommand::Get(_), ReadStrategy::QuorumRead) => {

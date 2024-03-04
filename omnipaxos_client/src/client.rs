@@ -12,7 +12,7 @@ use common::{kv::*, messages::*};
 #[derive(Debug)]
 struct RequestData {
     time_sent_utc: i64,
-    response: Option<(i64, ClientResponse)>,
+    response: Option<(i64, ServerMessage)>,
 }
 
 pub struct Client {
@@ -89,7 +89,7 @@ impl Client {
     }
 
     async fn send_command(&mut self, command: KVCommand) {
-        let request = ClientRequest::Append(self.command_id, command);
+        let request = ClientMessage::Append(self.command_id, command);
         let data = RequestData {
             time_sent_utc: Utc::now().timestamp_millis(),
             response: None,
@@ -97,14 +97,14 @@ impl Client {
         self.request_data.push(data);
         self.command_id += 1;
         self.server
-            .send(NetworkMessage::ClientRequest(request))
+            .send(NetworkMessage::ClientMessage(request))
             .await
             .expect("Couldn't send message to server");
     }
 
     fn handle_response(&mut self, msg: NetworkMessage) {
         match msg {
-            NetworkMessage::ClientResponse(response) => {
+            NetworkMessage::ServerMessage(response) => {
                 let cmd_id = response.command_id();
                 let response_time = Utc::now().timestamp_millis();
                 self.request_data[cmd_id].response = Some((response_time, response));

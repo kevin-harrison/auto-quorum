@@ -54,13 +54,13 @@ impl Network {
         network
     }
 
-    pub async fn send(&mut self, to: NodeId, request: ClientRequest) {
+    pub async fn send(&mut self, to: NodeId, messge: ClientMessage) {
         let found_connection = self.connections.iter_mut().find(|(id, _conn)| *id == to);
         match found_connection {
             Some((_id, connection)) => {
-                trace!("Sending to server {to}: {request:?}");
+                trace!("Sending to server {to}: {message:?}");
                 if let Err(err) = connection
-                    .send(NetworkMessage::ClientRequest(request))
+                    .send(NetworkMessage::ClientMessage(message))
                     .await
                 {
                     warn!("Couldn't send message to node {to}: {err}");
@@ -95,7 +95,7 @@ impl Stream for Network {
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         match Pin::new(&mut self.connections).poll_next(cx) {
             Poll::Ready(Some((id, Ok(msg)))) => match msg {
-                NetworkMessage::ClientResponse(resp) => Poll::Ready(Some((id, Ok(resp)))),
+                NetworkMessage::ServerMessage(m) => Poll::Ready(Some((id, Ok(m)))),
                 m => {
                     let unexpected_input = std::io::Error::new(
                         std::io::ErrorKind::InvalidData,

@@ -167,9 +167,9 @@ impl Network {
             ConnectionId::ClientConnection(id) => {
                 while let Some(msg) = reader.next().await {
                     match msg {
-                        Ok(NetworkMessage::ClientRequest(m)) => {
+                        Ok(NetworkMessage::ClientMessage(m)) => {
                             debug!("Received request from client {id}: {m:?}");
-                            let request = Incoming::ClientRequest(id, m);
+                            let request = Incoming::ClientMessage(id, m);
                             message_sink.send(request).await.unwrap();
                         }
                         Ok(m) => warn!("Received unexpected message: {m:?}"),
@@ -248,7 +248,7 @@ impl Network {
 
     pub async fn send(&mut self, message: Outgoing) {
         match message {
-            Outgoing::ClientResponse(client_id, msg) => self.send_to_client(client_id, msg).await,
+            Outgoing::ServerMessage(client_id, msg) => self.send_to_client(client_id, msg).await,
             Outgoing::ClusterMessage(server_id, msg) => self.send_to_cluster(server_id, msg).await,
         }
     }
@@ -274,10 +274,10 @@ impl Network {
         }
     }
 
-    async fn send_to_client(&mut self, to: ClientId, msg: ClientResponse) {
+    async fn send_to_client(&mut self, to: ClientId, msg: ServerMessage) {
         if let Some(writer) = self.client_connections.get_mut(&to) {
             debug!("Responding to client {to}: {msg:?}");
-            let net_msg = NetworkMessage::ClientResponse(msg);
+            let net_msg = NetworkMessage::ServerMessage(msg);
             if let Err(err) = writer.send(net_msg).await {
                 warn!("Couldn't send message to client {to}: {err}");
                 warn!("Removing connection to client {to}");
