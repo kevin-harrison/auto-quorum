@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{time::Duration, env};
 
 use client::Client;
 
@@ -6,24 +6,31 @@ mod client;
 
 #[tokio::main]
 pub async fn main() {
-    let mut args = std::env::args().skip(1);
-    // let cluster_size_arg = args.next().expect("Requires CLUSTER SIZE argument");
-    // let cluster_size = cluster_size_arg.parse().expect("Invalid CLUSTER SIZE arg");
-    let server_id_arg = args.next().expect("Requires SERVER ID argument");
-    let server_id = server_id_arg.parse().expect("Invalid ACTIVE SERVER ID arg");
-    let duration_arg = args.next().expect("Requires DURATION argument");
-    let duration = duration_arg.parse().expect("Invalid DURATION arg");
-    let start_delay_arg = args.next().expect("Requires START DELAY argument");
-    let start_delay = start_delay_arg.parse().expect("Invalid START DELAY arg");
-    let end_delay_arg = args.next().expect("Requires END DELAY argument");
-    let end_delay = end_delay_arg.parse().expect("Invalid END DELAY arg");
-    let local_deployment = match args.next() {
-        Some(local_arg) => match local_arg.trim().to_lowercase().as_str() {
+    let server_id  = match env::var("SERVER_ID") {
+        Ok(id_str) => id_str.parse().expect("Invalid SERVER ID arg"),
+        Err(_) => panic!("Requires SERVER ID argument")
+    };
+    let duration  = match env::var("DURATION") {
+        Ok(duration_str) => duration_str.parse().expect("Invalid DURATION arg"),
+        Err(_) => panic!("Requires DURATION argument")
+    };
+    let start_delay  = match env::var("START_DELAY") {
+        Ok(start_str) => start_str.parse().expect("Invalid START_DELAY arg"),
+        Err(_) => panic!("Requires START_DELAY argument")
+    };
+    let end_delay  = match env::var("END_DELAY") {
+        Ok(end_str) => end_str.parse().expect("Invalid END_DELAY arg"),
+        Err(_) => panic!("Requires END_DELAY argument")
+    };
+    let local_deployment  = match env::var("local") {
+        Ok(local_str) => {
+            match local_str.trim().to_lowercase().as_str() {
             "true" | "t" | "yes" | "y" | "1" => true,
             "false" | "f" | "no" | "n" | "0" => false,
-            _ => panic!("Invalid LOCAL argument"),
-        },
-        None => false,
+            _ => panic!("Invalid LOCAL argument")
+            }
+        }
+        Err(_) => false 
     };
 
     // Simple benchmark
