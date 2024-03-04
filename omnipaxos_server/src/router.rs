@@ -1,9 +1,8 @@
-use anyhow::{anyhow, Error};
+use anyhow::Error;
 
 use futures::{SinkExt, Stream};
 use omnipaxos::messages::ballot_leader_election::BLEMsg;
 use omnipaxos::messages::Message as OmniPaxosMessage;
-use std::net::ToSocketAddrs;
 use std::task::{Context, Poll};
 use std::{
     collections::{HashMap, VecDeque},
@@ -11,26 +10,12 @@ use std::{
     pin::Pin,
 };
 use tokio::net::{TcpListener, TcpStream};
-use tokio_serde::{formats::Cbor, Framed};
-use tokio_util::codec::{Framed as CodecFramed, LengthDelimitedCodec};
 
-use common::{kv::ClientId, messages::*};
+use common::{kv::ClientId, messages::*, util::{get_node_addr, wrap_stream, Connection as NodeConnection}};
 use omnipaxos::util::NodeId;
 
 use log::*;
 use std::mem;
-
-type NodeConnection = Framed<
-    CodecFramed<TcpStream, LengthDelimitedCodec>,
-    NetworkMessage,
-    NetworkMessage,
-    Cbor<NetworkMessage, NetworkMessage>,
->;
-
-fn wrap_stream(stream: TcpStream) -> NodeConnection {
-    let length_delimited = CodecFramed::new(stream, LengthDelimitedCodec::new());
-    Framed::new(length_delimited, Cbor::default())
-}
 
 pub struct Router {
     id: NodeId,
@@ -43,17 +28,6 @@ pub struct Router {
 }
 
 impl Router {
-    fn get_node_addr(node: NodeId, is_local: bool) -> Result<SocketAddr, Error> {
-        let dns_name = if is_local {
-            // format!("s{node}:800{node}")
-            format!("localhost:800{node}")
-        } else {
-            format!("server-{node}.internal.zone.:800{node}")
-        };
-        let address = dns_name.to_socket_addrs()?.next().unwrap();
-        Ok(address)
-    }
-
     pub async fn new(id: NodeId, peers: Vec<NodeId>, is_local: bool) -> Result<Self, Error> {
         let port = 8000 + id as u16;
         let listening_address = SocketAddr::from(([0, 0, 0, 0], port));
@@ -116,9 +90,9 @@ impl Router {
     }
 
     async fn add_node(&mut self, node: NodeId) -> Result<(), Error> {
-        let address = Self::get_node_addr(node, self.is_local)?;
+        let address = get_node_addr(node, self.is_local)?;
         let tcp_stream = TcpStream::connect(address).await?;
-        tcp_stream.set_nodelay(true)?;
+        // tcp_stream.set_nodelay(true)?;
         let mut framed_stream = wrap_stream(tcp_stream);
         framed_stream
             .send(NetworkMessage::NodeRegister(self.id))
@@ -138,7 +112,7 @@ impl Stream for Router {
             match val {
                 Ok((tcp_stream, socket_addr)) => {
                     debug!("New connection from {}", socket_addr);
-                    tcp_stream.set_nodelay(true)?;
+                    // tcp_stream.set_nodelay(true)?;
                     let framed_stream = wrap_stream(tcp_stream);
                     self_mut.pending_nodes.push(framed_stream);
                 }

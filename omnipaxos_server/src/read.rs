@@ -99,7 +99,6 @@ impl QuorumReader {
     }
 
     pub fn rinse(&mut self, decided_idx: usize) -> Vec<Command> {
-        debug!("Rinsing at decided_idx {decided_idx}");
         let mut result = vec![];
         while !self.ready_reads.is_empty() {
             if self.ready_reads[0].read_idx >= decided_idx {

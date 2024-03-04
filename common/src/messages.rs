@@ -23,6 +23,15 @@ pub enum ClientResponse {
     Read(CommandId, Option<String>),
 }
 
+impl ClientResponse {
+    pub fn command_id(&self) -> CommandId {
+        match self {
+            ClientResponse::Write(id) => *id,
+            ClientResponse::Read(id, _) => *id,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ClusterMessage {
     OmniPaxosMessage(OmniPaxosMessage<Command>),
@@ -30,6 +39,7 @@ pub enum ClusterMessage {
     QuorumReadResponse(QuorumReadResponse),
     // Reads, writes
     WorkloadUpdate(u64, u64),
+    ReadStrategyUpdate(Vec<ReadStrategy>),
 }
 
 // next
@@ -59,4 +69,12 @@ pub struct QuorumReadResponse {
     pub command_id: CommandId,
     pub read_quorum_config: ReadQuorumConfig,
     pub accepted_idx: usize,
+}
+
+
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ReadStrategy {
+    #[default]
+    QuorumRead,
+    ReadAsWrite,
 }

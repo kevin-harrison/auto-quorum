@@ -1,9 +1,10 @@
-use omnipaxos::{macros::Entry, storage::Snapshot, util::NodeId};
+use omnipaxos::{macros::Entry, storage::Snapshot};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-pub type CommandId = u64;
+pub type CommandId = usize;
 pub type ClientId = u64;
+pub type NodeId = omnipaxos::util::NodeId;
 
 #[derive(Debug, Clone, Entry, Serialize, Deserialize)]
 pub struct Command {

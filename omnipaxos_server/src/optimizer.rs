@@ -1,6 +1,7 @@
+use common::messages::ReadStrategy;
 use omnipaxos::util::NodeId;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct Load {
     pub reads: u64,
     pub writes: u64,
@@ -34,6 +35,7 @@ impl std::fmt::Debug for ClusterMetrics {
 }
 
 type NodeLatencies = Vec<Option<u64>>;
+const LATENCY_CAP: u64 = 9999;
 
 impl ClusterMetrics {
     pub fn new(num_nodes: usize, failure_tolerance: usize) -> Self {
@@ -61,8 +63,8 @@ impl ClusterMetrics {
                             Some(measurement) => self.latencies[from][to] = measurement,
                             None => {
                                 let doubled_latency = self.latencies[from][to] * 2;
-                                if doubled_latency > 999999 {
-                                    self.latencies[from][to] = 999999;
+                                if doubled_latency > LATENCY_CAP {
+                                    self.latencies[from][to] = LATENCY_CAP;
                                 } else {
                                     self.latencies[from][to] = doubled_latency;
                                 }
@@ -77,6 +79,18 @@ impl ClusterMetrics {
 
     pub fn update_workload(&mut self, from: NodeId, reads: u64, writes: u64) {
         self.workload[from as usize - 1] = Load { reads, writes };
+    }
+
+    pub fn inc_workload_reads(&mut self, node: NodeId) {
+        self.workload[node as usize - 1].reads += 1;
+    }
+
+    pub fn inc_workload_writes(&mut self, node: NodeId) {
+        self.workload[node as usize - 1].writes += 1;
+    }
+
+    pub fn take_workload(&mut self, node: NodeId) -> Load {
+        std::mem::take(&mut self.workload[node as usize - 1])
     }
 
     fn quorum_latencies(&self, node: usize) -> Vec<u64> {
@@ -97,7 +111,7 @@ pub struct ClusterStrategy {
     // pub estimated_latency: u64,
     pub leader: NodeId,
     pub read_quorum_size: usize,
-    pub read_strat: Vec<bool>,
+    pub read_strat: Vec<ReadStrategy>,
 }
 
 pub fn find_better_strategy(
@@ -132,12 +146,19 @@ pub fn find_better_strategy(
         }
     }
     match best_parameters {
-        Some((leader, read_quorum_size, read_strat)) => Some(ClusterStrategy {
-            // estimated_latency: min_latency,
-            leader: leader as NodeId + 1,
-            read_quorum_size,
-            read_strat,
-        }),
+        Some((leader, read_quorum_size, read_strat)) => {
+            let relative_latency_reduction = min_latency as f64 / current_strategy_latency as f64;
+            if relative_latency_reduction < 0.8 {
+                Some(ClusterStrategy {
+                    // estimated_latency: min_latency,
+                    leader: leader as NodeId + 1,
+                    read_quorum_size,
+                    read_strat,
+                })
+            } else {
+                None
+            }
+        },
         None => None,
     }
 }
@@ -147,11 +168,11 @@ fn get_latency(
     quorum_latencies: &Vec<Vec<u64>>,
     leader: usize,
     read_quorum_size: usize,
-) -> (u64, Vec<bool>) {
+) -> (u64, Vec<ReadStrategy>) {
     let write_quorum_size = metrics.num_nodes - read_quorum_size + 1;
     // println!("Testing leader={leader_node}, read_quorum={read_quorum_size}");
     let mut total_latency = 0;
-    let mut read_strats = vec![false; metrics.num_nodes];
+    let mut read_strats = vec![ReadStrategy::QuorumRead; metrics.num_nodes];
     for node in 0..metrics.num_nodes {
         if metrics.workload[node].reads == 0 && metrics.workload[node].writes == 0 {
             continue;
@@ -161,8 +182,7 @@ fn get_latency(
         let write_latency = travel_to_leader_latency + leader_write_latency;
         let quorum_read_latency = 2 * quorum_latencies[node][read_quorum_size - 1];
         if write_latency < quorum_read_latency {
-            // treat reads as writes
-            read_strats[node] = true;
+            read_strats[node] = ReadStrategy::ReadAsWrite;
             total_latency +=
                 (metrics.workload[node].reads + metrics.workload[node].writes) * write_latency;
             // println!("Node {node}: write_lat={write_latency}");

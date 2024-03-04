@@ -29,8 +29,6 @@ pub struct OmniPaxosServer {
     current_decided_idx: usize,
     current_leader: Option<NodeId>,
     quorum_reader: QuorumReader,
-    reads: u64,
-    writes: u64,
     metrics: ClusterMetrics,
     strategy: ClusterStrategy,
 }
@@ -54,7 +52,7 @@ impl OmniPaxosServer {
         let initial_strategy = ClusterStrategy {
             leader: id,
             read_quorum_size: omnipaxos.get_read_config().read_quorum_size,
-            read_strat: vec![false; nodes.len()],
+            read_strat: vec![ReadStrategy::default(); nodes.len()],
         };
         OmniPaxosServer {
             id,
@@ -65,8 +63,6 @@ impl OmniPaxosServer {
             current_decided_idx: 0,
             current_leader: None,
             quorum_reader: QuorumReader::new(id),
-            reads: 0,
-            writes: 0,
             metrics: ClusterMetrics::new(num_nodes, 1),
             strategy: initial_strategy,
         }
@@ -74,7 +70,7 @@ impl OmniPaxosServer {
 
     pub async fn run(&mut self) {
         let mut outgoing_interval = tokio::time::interval(Duration::from_millis(1));
-        let mut election_interval = tokio::time::interval(Duration::from_millis(1900));
+        let mut election_interval = tokio::time::interval(Duration::from_millis(2000));
         let mut optimize_interval = tokio::time::interval(Duration::from_secs(2));
 
         loop {
@@ -83,13 +79,14 @@ impl OmniPaxosServer {
                 _ = election_interval.tick() => {
                     if let Some(latencies) = self.omnipaxos.tick() {
                         self.metrics.update_latencies(latencies);
-                        self.update_workload().await;
                         warn!("Metrics = \n{:?}", self.metrics);
                         self.current_leader = self.omnipaxos.get_current_leader();
                         warn!("Leader = {:?} with ballot {:?}\n", self.current_leader, self.omnipaxos.get_promise());
+                        warn!("Readstrat = {:?}", self.strategy.read_strat);
+                        self.send_metrics().await;
                     }
                 },
-                _ = optimize_interval.tick() => self.handle_optimize_timeout(),
+                _ = optimize_interval.tick() => self.handle_optimize_timeout().await,
                 _ = outgoing_interval.tick() => {
                     self.handle_decided_entries().await;
                     self.send_outgoing_msgs().await;
@@ -101,11 +98,11 @@ impl OmniPaxosServer {
         }
     }
 
-    fn handle_optimize_timeout(&mut self) {
+    async fn handle_optimize_timeout(&mut self) {
         if let Some(leader) = self.current_leader {
+            // TODO: strategy updates should be atomic (possible if we put them in config log)
             self.strategy.leader = leader;
             self.strategy.read_quorum_size = self.omnipaxos.get_read_config().read_quorum_size;
-            // TODO: update read strat?
             let optimal_strategy = optimizer::find_better_strategy(&self.metrics, &self.strategy);
             if let Some(new_strategy) = optimal_strategy {
                 error!("Found a better strategy: {new_strategy:#?}");
@@ -130,8 +127,9 @@ impl OmniPaxosServer {
                             .unwrap();
                     }
                     if new_strategy.read_strat != self.strategy.read_strat {
-                        // TODO: update read_strat
-                        // TODO: do update in omnipaxos => server to put metadata in read_config?
+                        self.strategy.read_strat = new_strategy.read_strat;
+                        // TODO: what if this gets dropped? (stubborn send or put in configlog)
+                        self.send_strat().await;
                     }
                 }
             }
@@ -217,27 +215,33 @@ impl OmniPaxosServer {
             Incoming::ClusterMessage(from, ClusterMessage::WorkloadUpdate(reads, writes)) => {
                 self.handle_workload_update(from, reads, writes)
             }
+            Incoming::ClusterMessage(from, ClusterMessage::ReadStrategyUpdate(strat)) => {
+                self.handle_read_strategy_update(from, strat);
+            }
         }
     }
 
     async fn handle_client_request(&mut self, from: ClientId, request: ClientRequest) {
         match request {
             ClientRequest::Append(command_id, kv_command) => {
-                if let KVCommand::Get(_) = &kv_command {
-                    // TODO: do read as write if strat says so
-                    self.reads += 1;
-                    self.start_quorum_read(from, command_id, kv_command).await;
-                } else {
-                    self.writes += 1;
-                    let command = Command {
-                        client_id: from,
-                        coordinator_id: self.id,
-                        id: command_id,
-                        kv_cmd: kv_command,
-                    };
-                    self.omnipaxos
-                        .append(command)
-                        .expect("Append to Omnipaxos log failed");
+                let read_strat = self.strategy.read_strat[self.id as usize - 1];
+                match (&kv_command, read_strat) {
+                    (KVCommand::Get(_), ReadStrategy::QuorumRead) => {
+                        self.metrics.inc_workload_reads(self.id);
+                        self.start_quorum_read(from, command_id, kv_command).await;
+                    }
+                    _ => {
+                        self.metrics.inc_workload_writes(self.id);
+                        let command = Command {
+                            client_id: from,
+                            coordinator_id: self.id,
+                            id: command_id,
+                            kv_cmd: kv_command,
+                        };
+                        self.omnipaxos
+                            .append(command)
+                            .expect("Append to Omnipaxos log failed");
+                    }
                 }
             }
         };
@@ -269,6 +273,14 @@ impl OmniPaxosServer {
 
     fn handle_workload_update(&mut self, from: NodeId, reads: u64, writes: u64) {
         self.metrics.update_workload(from, reads, writes);
+    }
+    
+    fn handle_read_strategy_update(&mut self, from: NodeId, read_strat: Vec<ReadStrategy>) {
+        if let Some(leader) = self.current_leader {
+            if from == leader {
+                self.strategy.read_strat = read_strat
+            }
+        }
     }
 
     // TODO: client sends to closest replica which might be the leader
@@ -308,17 +320,22 @@ impl OmniPaxosServer {
         }
     }
 
-    async fn update_workload(&mut self) {
-        let reads = std::mem::take(&mut self.reads);
-        let writes = std::mem::take(&mut self.writes);
-        self.metrics.update_workload(self.id, reads, writes);
+    async fn send_metrics(&mut self) {
+        let workload = self.metrics.take_workload(self.id);
         if let Some(leader) = self.current_leader {
-            if leader != self.id {
-                let msg = ClusterMessage::WorkloadUpdate(reads, writes);
+            if self.id != leader {
+                let msg = ClusterMessage::WorkloadUpdate(workload.reads, workload.writes);
                 self.network
                     .send(Outgoing::ClusterMessage(leader, msg))
                     .await;
             }
+        }
+    }
+    
+    async fn send_strat(&mut self) {
+        let msg = ClusterMessage::ReadStrategyUpdate(self.strategy.read_strat.clone());
+        for peer in self.omnipaxos.get_peers() {
+            self.network.send(Outgoing::ClusterMessage(*peer, msg.clone())).await;
         }
     }
 }
