@@ -1,4 +1,3 @@
-use log::debug;
 use omnipaxos::{storage::ReadQuorumConfig, util::NodeId};
 use std::collections::{HashMap, VecDeque};
 

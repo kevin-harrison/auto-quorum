@@ -1,6 +1,7 @@
 use chrono::Utc;
 use futures::SinkExt;
 use rand::Rng;
+use serde::Serialize;
 use std::time::Duration;
 
 use tokio::net::TcpStream;
@@ -9,10 +10,16 @@ use tokio_stream::StreamExt;
 use common::util::{get_node_addr, wrap_stream, Connection as ServerConnection};
 use common::{kv::*, messages::*};
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 struct RequestData {
     time_sent_utc: i64,
-    response: Option<(i64, ServerMessage)>,
+    response: Option<Response>,
+}
+
+#[derive(Debug, Serialize)]
+struct Response {
+    time_recieved_utc: i64,
+    message: ServerMessage,
 }
 
 pub struct Client {
@@ -107,7 +114,7 @@ impl Client {
             NetworkMessage::ServerMessage(response) => {
                 let cmd_id = response.command_id();
                 let response_time = Utc::now().timestamp_millis();
-                self.request_data[cmd_id].response = Some((response_time, response));
+                self.request_data[cmd_id].response = Some(Response {time_recieved_utc: response_time, message: response});
             }
             _ => panic!("Recieved unexpected message: {msg:?}"),
         }
@@ -122,10 +129,12 @@ impl Client {
 
     fn print_results(&self) {
         for request_data in &self.request_data {
-            println!(
-                "{:?} {:?}",
-                request_data.time_sent_utc, request_data.response
-            );
+            let request_json = serde_json::to_string(request_data).unwrap();
+            println!("{request_json}");
+            // println!(
+            //     "{:?} {:?}",
+            //     request_data.time_sent_utc, request_data.response
+            // );
         }
     }
 }

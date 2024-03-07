@@ -22,7 +22,7 @@ pub async fn main() {
         Ok(end_str) => end_str.parse().expect("Invalid END_DELAY arg"),
         Err(_) => panic!("Requires END_DELAY argument")
     };
-    let local_deployment  = match env::var("local") {
+    let local_deployment  = match env::var("LOCAL") {
         Ok(local_str) => {
             match local_str.trim().to_lowercase().as_str() {
             "true" | "t" | "yes" | "y" | "1" => true,

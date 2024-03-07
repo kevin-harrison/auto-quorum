@@ -75,6 +75,6 @@ pub struct QuorumReadResponse {
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ReadStrategy {
     #[default]
-    QuorumRead,
     ReadAsWrite,
+    QuorumRead,
 }

@@ -4,7 +4,7 @@ use env_logger;
 use omnipaxos::{ClusterConfig, OmniPaxosConfig, ServerConfig};
 
 mod database;
-mod network;
+// mod network;
 mod optimizer;
 mod read;
 mod router;
@@ -19,11 +19,11 @@ pub async fn main() {
     };
     let optimize  = match env::var("OPTIMIZE") {
         Ok(optimize_str) => match optimize_str.trim().to_lowercase().as_str() {
-            "true" | "t" | "yes" | "y" | "1" => Ok(true),
-            "false" | "f" | "no" | "n" | "0" => Ok(false),
-            _ => Err("Invalid OPTIMIZE argument"),
+            "true" | "t" | "yes" | "y" | "1" => true,
+            "false" | "f" | "no" | "n" | "0" => false,
+            _ => panic!("Invalid OPTIMIZE argument"),
         }
-        Err(_) => panic!("Requires OPTIMIZE argument")
+        Err(_) => true
     };
     let local_deployment = match env::var("LOCAL") {
         Ok(local_str) => match local_str.trim().to_lowercase().as_str() {

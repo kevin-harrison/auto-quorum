@@ -92,7 +92,9 @@ impl Router {
     async fn add_node(&mut self, node: NodeId) -> Result<(), Error> {
         let address = get_node_addr(node, self.is_local)?;
         let tcp_stream = TcpStream::connect(address).await?;
-        // tcp_stream.set_nodelay(true)?;
+        if self.is_local {
+            tcp_stream.set_nodelay(true)?;
+        }
         let mut framed_stream = wrap_stream(tcp_stream);
         framed_stream
             .send(NetworkMessage::NodeRegister(self.id))
@@ -112,7 +114,9 @@ impl Stream for Router {
             match val {
                 Ok((tcp_stream, socket_addr)) => {
                     debug!("New connection from {}", socket_addr);
-                    // tcp_stream.set_nodelay(true)?;
+                    if self_mut.is_local {
+                        tcp_stream.set_nodelay(true)?;
+                    }
                     let framed_stream = wrap_stream(tcp_stream);
                     self_mut.pending_nodes.push(framed_stream);
                 }

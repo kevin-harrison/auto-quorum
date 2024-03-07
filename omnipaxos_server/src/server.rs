@@ -1,7 +1,8 @@
 use futures::StreamExt;
 use log::*;
+use chrono::Utc;
 use std::time::Duration;
-use tokio::time::Instant;
+
 
 use omnipaxos::{
     util::{FlexibleQuorum, LogEntry, NodeId},
@@ -11,7 +12,6 @@ use omnipaxos_storage::memory_storage::MemoryStorage;
 
 use crate::{
     database::Database,
-    network::{Network, NetworkError},
     optimizer::{self, ClusterMetrics, ClusterStrategy},
     read::QuorumReader,
     router::Router,
@@ -54,6 +54,7 @@ impl OmniPaxosServer {
             leader: id,
             read_quorum_size: omnipaxos.get_read_config().read_quorum_size,
             read_strat: vec![ReadStrategy::default(); nodes.len()],
+            average_latency_estimate: 0.
         };
         OmniPaxosServer {
             id,
@@ -71,24 +72,29 @@ impl OmniPaxosServer {
     }
 
     pub async fn run(&mut self) {
-        let mut outgoing_interval = tokio::time::interval(Duration::from_millis(1));
+        let mut outgoing_interval = tokio::time::interval(Duration::from_millis(3));
         let mut election_interval = tokio::time::interval(Duration::from_millis(2000));
-        let mut optimize_interval = tokio::time::interval(Duration::from_millis(2100));
+        // let mut optimize_interval = tokio::time::interval(Duration::from_millis(2010));
 
         loop {
             tokio::select! {
-                // biased;
+                biased;
                 _ = election_interval.tick() => {
                     if let Some(latencies) = self.omnipaxos.tick() {
                         self.metrics.update_latencies(latencies);
                         warn!("Metrics = \n{:?}", self.metrics);
+                        let timestamp = Utc::now().timestamp_millis();
+                        let metrics_json = serde_json::to_string(&self.metrics).unwrap();
+                        println!("{{ \"timestamp\": {}, \"cluster_metrics\": {}}}", timestamp, metrics_json);
                         self.current_leader = self.omnipaxos.get_current_leader();
                         warn!("Leader = {:?} with ballot {:?}\n", self.current_leader, self.omnipaxos.get_promise());
                         warn!("Readstrat = {:?}", self.strategy.read_strat);
+                        // TODO: revisit order here
+                        self.handle_optimize_timeout().await;
                         self.send_metrics().await;
                     }
                 },
-                _ = optimize_interval.tick() => self.handle_optimize_timeout().await,
+                // _ = optimize_interval.tick() => self.handle_optimize_timeout().await,
                 _ = outgoing_interval.tick() => {
                     self.handle_decided_entries().await;
                     self.send_outgoing_msgs().await;
@@ -109,6 +115,9 @@ impl OmniPaxosServer {
             if let Some(new_strategy) = optimal_strategy {
                 error!("Found a better strategy: {new_strategy:#?}");
                 if self.optimize && leader == self.id {
+                    let timestamp = Utc::now().timestamp_millis();
+                    let strategy_json = serde_json::to_string(&new_strategy).unwrap();
+                    println!("{{ \"timestamp\": {}, \"cluster_strategy\": {}}}", timestamp, strategy_json);
                     if new_strategy.leader != self.id {
                         error!("Relinquishing leadership to {}", new_strategy.leader);
                         self.omnipaxos.relinquish_leadership(new_strategy.leader);
@@ -341,3 +350,4 @@ impl OmniPaxosServer {
         }
     }
 }
+

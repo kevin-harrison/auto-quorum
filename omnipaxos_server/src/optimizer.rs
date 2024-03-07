@@ -1,12 +1,15 @@
 use common::messages::ReadStrategy;
+use log::error;
 use omnipaxos::util::NodeId;
+use serde::Serialize;
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, Serialize)]
 pub struct Load {
     pub reads: u64,
     pub writes: u64,
 }
 
+#[derive(Serialize)]
 pub struct ClusterMetrics {
     pub num_nodes: usize,
     pub failure_tolerance: usize,
@@ -54,7 +57,7 @@ impl ClusterMetrics {
     }
 
     pub fn update_latencies(&mut self, new_latencies: Vec<Option<NodeLatencies>>) {
-        // TODO: handle missing data points
+        // TODO: handle missing data points from other nodes
         for from in 0..self.latencies.len() {
             match &new_latencies[from] {
                 Some(latencies) => {
@@ -106,9 +109,9 @@ impl ClusterMetrics {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct ClusterStrategy {
-    // pub estimated_latency: u64,
+    pub average_latency_estimate: f64,
     pub leader: NodeId,
     pub read_quorum_size: usize,
     pub read_strat: Vec<ReadStrategy>,
@@ -149,8 +152,10 @@ pub fn find_better_strategy(
         Some((leader, read_quorum_size, read_strat)) => {
             let relative_latency_reduction = min_latency as f64 / current_strategy_latency as f64;
             if relative_latency_reduction < 0.8 {
+                error!("Better strategy {current_strategy_latency} -> {min_latency}");
+                error!("with metrics {metrics:?}");
                 Some(ClusterStrategy {
-                    // estimated_latency: min_latency,
+                    average_latency_estimate: min_latency as f64 / metrics.get_total_opertations() as f64,
                     leader: leader as NodeId + 1,
                     read_quorum_size,
                     read_strat,
