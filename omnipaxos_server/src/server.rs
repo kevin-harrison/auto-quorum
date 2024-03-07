@@ -72,7 +72,7 @@ impl OmniPaxosServer {
     }
 
     pub async fn run(&mut self) {
-        let mut outgoing_interval = tokio::time::interval(Duration::from_millis(3));
+        // let mut outgoing_interval = tokio::time::interval(Duration::from_millis(3));
         let mut election_interval = tokio::time::interval(Duration::from_millis(2000));
         // let mut optimize_interval = tokio::time::interval(Duration::from_millis(2010));
 
@@ -92,13 +92,14 @@ impl OmniPaxosServer {
                         // TODO: revisit order here
                         self.handle_optimize_timeout().await;
                         self.send_metrics().await;
+                        self.send_outgoing_msgs().await;
                     }
                 },
                 // _ = optimize_interval.tick() => self.handle_optimize_timeout().await,
-                _ = outgoing_interval.tick() => {
-                    self.handle_decided_entries().await;
-                    self.send_outgoing_msgs().await;
-                },
+                // _ = outgoing_interval.tick() => {
+                //     self.handle_decided_entries().await;
+                //     self.send_outgoing_msgs().await;
+                // },
                 Some(msg) = self.network.next() => {
                     self.handle_incoming_msg(msg.unwrap()).await;
                 },
@@ -121,6 +122,7 @@ impl OmniPaxosServer {
                     if new_strategy.leader != self.id {
                         error!("Relinquishing leadership to {}", new_strategy.leader);
                         self.omnipaxos.relinquish_leadership(new_strategy.leader);
+                        self.send_outgoing_msgs().await;
                     }
                     if new_strategy.read_quorum_size != self.strategy.read_quorum_size {
                         let write_quorum_size =
@@ -136,6 +138,7 @@ impl OmniPaxosServer {
                         self.omnipaxos
                             .reconfigure_joint_consensus(new_config)
                             .unwrap();
+                        self.send_outgoing_msgs().await;
                     }
                     if new_strategy.read_strat != self.strategy.read_strat {
                         self.strategy.read_strat = new_strategy.read_strat;
@@ -215,7 +218,9 @@ impl OmniPaxosServer {
                 self.handle_client_request(from, request).await
             }
             Incoming::ClusterMessage(_from, ClusterMessage::OmniPaxosMessage(m)) => {
-                self.omnipaxos.handle_incoming(m)
+                self.omnipaxos.handle_incoming(m);
+                self.send_outgoing_msgs().await;
+                self.handle_decided_entries().await;
             }
             Incoming::ClusterMessage(from, ClusterMessage::QuorumReadRequest(req)) => {
                 self.handle_quorum_read_request(from, req).await
@@ -252,6 +257,7 @@ impl OmniPaxosServer {
                         self.omnipaxos
                             .append(command)
                             .expect("Append to Omnipaxos log failed");
+                        self.send_outgoing_msgs().await;
                     }
                 }
             }
