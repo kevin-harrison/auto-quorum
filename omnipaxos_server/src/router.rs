@@ -11,7 +11,11 @@ use std::{
 };
 use tokio::net::{TcpListener, TcpStream};
 
-use common::{kv::ClientId, messages::*, util::{get_node_addr, wrap_stream, Connection as NodeConnection}};
+use common::{
+    kv::ClientId,
+    messages::*,
+    util::{get_node_addr, wrap_stream, Connection as NodeConnection},
+};
 use omnipaxos::util::NodeId;
 
 use log::*;
@@ -20,6 +24,7 @@ use std::mem;
 pub struct Router {
     id: NodeId,
     is_local: bool,
+    congestion_control: bool,
     next_client_id: ClientId,
     listener: TcpListener,
     nodes: HashMap<NodeId, NodeConnection>,
@@ -28,14 +33,20 @@ pub struct Router {
 }
 
 impl Router {
-    pub async fn new(id: NodeId, peers: Vec<NodeId>, is_local: bool) -> Result<Self, Error> {
+    pub async fn new(
+        id: NodeId,
+        nodes: Vec<NodeId>,
+        is_local: bool,
+        congestion_control: bool,
+    ) -> Result<Self, Error> {
         let port = 8000 + id as u16;
         let listening_address = SocketAddr::from(([0, 0, 0, 0], port));
         let listener = TcpListener::bind(listening_address).await?;
         Ok(Self {
             id,
             is_local,
-            next_client_id: peers.into_iter().max().unwrap() + 1,
+            congestion_control,
+            next_client_id: nodes.into_iter().max().unwrap() + 1,
             listener,
             nodes: HashMap::new(),
             pending_nodes: vec![],
@@ -92,9 +103,9 @@ impl Router {
     async fn add_node(&mut self, node: NodeId) -> Result<(), Error> {
         let address = get_node_addr(node, self.is_local)?;
         let tcp_stream = TcpStream::connect(address).await?;
-        // if self.is_local {
+        if !self.congestion_control {
             tcp_stream.set_nodelay(true)?;
-        // }
+        }
         let mut framed_stream = wrap_stream(tcp_stream);
         framed_stream
             .send(NetworkMessage::NodeRegister(self.id))
@@ -114,9 +125,9 @@ impl Stream for Router {
             match val {
                 Ok((tcp_stream, socket_addr)) => {
                     debug!("New connection from {}", socket_addr);
-                    // if self_mut.is_local {
+                    if !self_mut.congestion_control {
                         tcp_stream.set_nodelay(true)?;
-                    // }
+                    }
                     let framed_stream = wrap_stream(tcp_stream);
                     self_mut.pending_nodes.push(framed_stream);
                 }

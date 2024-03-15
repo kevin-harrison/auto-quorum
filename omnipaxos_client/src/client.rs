@@ -3,7 +3,9 @@ use futures::SinkExt;
 use rand::Rng;
 use serde::Serialize;
 use std::time::Duration;
+use serde::Deserialize;
 
+use tokio::time::interval;
 use tokio::net::TcpStream;
 use tokio_stream::StreamExt;
 
@@ -22,18 +24,45 @@ struct Response {
     message: ServerMessage,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct ClientConfig {
+    server_id: u64,
+    read_ratio: f64,
+    request_rate_intervals: Vec<RequestInterval>,
+    local_deployment: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, Clone, Copy)]
+pub struct RequestInterval {
+    duration_sec: u64,
+    requests_per_sec: u64,
+}
+
+impl RequestInterval {
+    fn get_interval_duration(self) -> Duration {
+        Duration::from_secs(self.duration_sec)
+    }
+
+    fn get_request_delay(self) -> Duration {
+        let delay_ms = 1000 / self.requests_per_sec;
+        assert!(delay_ms != 0);
+        Duration::from_millis(delay_ms)
+    }
+}
+
 pub struct Client {
     server: ServerConnection,
     command_id: CommandId,
     request_data: Vec<RequestData>,
-    // sent_data: Vec<Utc>,
-    // recieved_data: Vec<Option<(Duration, ClientResponse)>>,
+    read_ratio: f64,
+    request_rate_intervals: Vec<RequestInterval>,
 }
 
 impl Client {
-    pub async fn new(server_id: NodeId, is_local: bool) -> Self {
+    pub async fn with(config: ClientConfig) -> Self {
+        let is_local = config.local_deployment.unwrap_or(false);
         let server_address =
-            get_node_addr(server_id, is_local).expect("Couldn't resolve server IP");
+            get_node_addr(config.server_id, is_local).expect("Couldn't resolve server IP");
         let server_stream = TcpStream::connect(server_address)
             .await
             .expect("Couldn't connect to server {server_id}");
@@ -42,8 +71,8 @@ impl Client {
             server: wrap_stream(server_stream),
             command_id: 0,
             request_data: Vec::with_capacity(8000),
-            // sent_data: Vec::with_capacity(8000),
-            // recieved_data: Vec::with_capacity(8000),
+            read_ratio: config.read_ratio,
+            request_rate_intervals: config.request_rate_intervals,
         };
         client.send_registration().await;
         client
@@ -61,18 +90,17 @@ impl Client {
         self.send_command(KVCommand::Get(key)).await;
     }
 
-    pub async fn run_simple(
-        &mut self,
-        run_duration: Duration,
-        initial_request_delay: Duration,
-        end_request_delay: Duration,
-    ) {
+    pub async fn run(&mut self) {
+        if self.request_rate_intervals.is_empty() {
+            return;
+        }
         let mut rng = rand::thread_rng();
-        let mut end_run = tokio::time::interval(run_duration);
-        let mut halfway = tokio::time::interval(run_duration / 2);
-        let mut request_interval = tokio::time::interval(initial_request_delay);
-        end_run.tick().await;
-        halfway.tick().await;
+        let intervals = self.request_rate_intervals.clone();
+        let mut intervals = intervals.iter();
+        let first_interval = intervals.next().unwrap();
+        let mut request_interval = interval(first_interval.get_request_delay());
+        let mut next_interval = interval(first_interval.get_interval_duration());
+        next_interval.tick().await;
 
         loop {
             tokio::select! {
@@ -80,16 +108,21 @@ impl Client {
                 Some(msg) = self.server.next() => self.handle_response(msg.unwrap()),
                 _ = request_interval.tick() => {
                     let key = self.command_id.to_string();
-                    match rng.gen_range(0..=2) {
-                        0 => self.put(key.clone(), key).await,
-                        1 => self.delete(key).await,
-                        _ => self.get(key).await,
+                    if rng.gen::<f64>() < self.read_ratio {
+                        self.get(key).await;
+                    } else {
+                        self.put(key.clone(), key).await;
                     }
                 },
-                _ = halfway.tick() => {
-                    request_interval = tokio::time::interval(end_request_delay);
+                _ = next_interval.tick() => {
+                    if let Some(new_interval) = intervals.next() {
+                        next_interval = interval(new_interval.get_interval_duration());
+                        next_interval.tick().await;
+                        request_interval = interval(new_interval.get_request_delay());
+                    } else {
+                        break;
+                    }
                 }
-                _ = end_run.tick() => break,
             }
         }
         self.print_results();

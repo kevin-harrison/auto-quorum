@@ -21,6 +21,7 @@ log = "0.4.20"
 rand = "0.8.5"
 rand_distr = "0.4.3"
 chrono = "0.4.34"
+toml = "0.8.11"
 
 [[bin]]
 name = "client"

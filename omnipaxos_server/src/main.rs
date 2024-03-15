@@ -1,55 +1,54 @@
-use std::env;
+use std::{env, fs};
 use crate::server::OmniPaxosServer;
+use common::kv::{Command, NodeId};
 use env_logger;
-use omnipaxos::{ClusterConfig, OmniPaxosConfig, ServerConfig};
+use omnipaxos::{ballot_leader_election::Ballot, storage::Storage, OmniPaxosConfig};
+use omnipaxos_storage::memory_storage::MemoryStorage;
+use router::Router;
+use serde::Deserialize;
+use toml;
 
 mod database;
-// mod network;
 mod optimizer;
 mod read;
 mod router;
 mod server;
 
+#[derive(Debug, Deserialize)]
+struct ServerConfig {
+    initial_leader: Option<NodeId>,
+    optimize: Option<bool>,
+    congestion_control: Option<bool>,
+    local_deployment: Option<bool>,
+}
+
 #[tokio::main]
 pub async fn main() {
     env_logger::init();
-    let server_id  = match env::var("SERVER_ID") {
-        Ok(id_str) => id_str.parse().expect("Invalid SERVER ID arg"),
-        Err(_) => panic!("Requires SERVER ID argument")
+    let config_file = match env::var("CONFIG_FILE") {
+        Ok(file_path) => file_path,
+        Err(_) => panic!("Requires CONFIG_FILE environment variable"),
     };
-    let optimize  = match env::var("OPTIMIZE") {
-        Ok(optimize_str) => match optimize_str.trim().to_lowercase().as_str() {
-            "true" | "t" | "yes" | "y" | "1" => true,
-            "false" | "f" | "no" | "n" | "0" => false,
-            _ => panic!("Invalid OPTIMIZE argument"),
-        }
-        Err(_) => true
-    };
-    let local_deployment = match env::var("LOCAL") {
-        Ok(local_str) => match local_str.trim().to_lowercase().as_str() {
-            "true" | "t" | "yes" | "y" | "1" => true,
-            "false" | "f" | "no" | "n" | "0" => false,
-            _ => panic!("Invalid LOCAL argument"),
-        },
-        Err(_) => false
-    };
+    let omnipaxos_config = OmniPaxosConfig::with_toml(&config_file).unwrap();
+    let config_string = fs::read_to_string(config_file).unwrap();
+    let server_config: ServerConfig = toml::from_str(&config_string).unwrap();
 
-    let cluster_config = ClusterConfig {
-        configuration_id: 1,
-        nodes: vec![1, 2, 3],
-        ..Default::default()
-    };
-    let server_config = ServerConfig {
-        pid: server_id,
-        election_tick_timeout: 1,
-        resend_message_tick_timeout: 5,
-        flush_batch_tick_timeout: 50,
-        ..Default::default()
-    };
-    let omnipaxos_config = OmniPaxosConfig {
-        cluster_config,
-        server_config,
-    };
-    let mut server = OmniPaxosServer::new(omnipaxos_config, optimize, local_deployment).await;
+    let server_id = omnipaxos_config.server_config.pid;
+    let nodes = omnipaxos_config.cluster_config.nodes.clone();
+    let local_deployment = server_config.local_deployment.unwrap_or(false);
+    let congestion_control = server_config.congestion_control.unwrap_or(false);
+    let optimize = server_config.optimize.unwrap_or(true);
+    let router = Router::new(server_id, nodes, local_deployment, congestion_control).await.unwrap();
+    let mut storage: MemoryStorage<Command> = MemoryStorage::default();
+    // Hack to set an initial leader for the cluster
+    let saved_promise = storage.get_promise().unwrap();
+    match (server_config.initial_leader, saved_promise) {
+        (Some(node_id), None) => {
+            let initial_ballot = Ballot { config_id: 1, n: 100, priority: 1, pid: node_id };
+            storage.set_promise(initial_ballot, node_id).unwrap()
+        }
+        _ => (),
+    }
+    let mut server = OmniPaxosServer::new(omnipaxos_config, storage, router, optimize).await;
     server.run().await;
 }

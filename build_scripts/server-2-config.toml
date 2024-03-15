@@ -1,0 +1,13 @@
+initial_leader = 1
+local_deployment = true
+
+[cluster_config]
+configuration_id = 1
+nodes = [1, 2, 3]
+flexible_quorum = { read_quorum_size = 2, write_quorum_size = 2 }
+
+[server_config]
+pid = 2
+election_tick_timeout = 1
+resend_message_tick_timeout = 5
+flush_batch_tick_timeout = 200

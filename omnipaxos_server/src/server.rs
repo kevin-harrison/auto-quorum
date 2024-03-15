@@ -1,8 +1,7 @@
+use chrono::Utc;
 use futures::StreamExt;
 use log::*;
-use chrono::Utc;
 use std::time::Duration;
-
 
 use omnipaxos::{
     util::{FlexibleQuorum, LogEntry, NodeId},
@@ -35,32 +34,28 @@ pub struct OmniPaxosServer {
 }
 
 impl OmniPaxosServer {
-    pub async fn new(omnipaxos_config: OmniPaxosConfig, optimize: bool, is_local: bool) -> Self {
+    pub async fn new(
+        omnipaxos_config: OmniPaxosConfig,
+        storage: MemoryStorage<Command>,
+        router: Router,
+        optimize: bool,
+    ) -> Self {
         let id = omnipaxos_config.server_config.pid;
         let nodes = omnipaxos_config.cluster_config.nodes.clone();
         let num_nodes = nodes.len();
-        let peers = omnipaxos_config
-            .cluster_config
-            .nodes
-            .iter()
-            .cloned()
-            .filter(|pid| *pid != id)
-            .collect();
         // let network = Network::new(id, peers).await.unwrap();
-        let network = Router::new(id, peers, is_local).await.unwrap();
-        let storage: MemoryStorage<Command> = MemoryStorage::default();
         let omnipaxos = omnipaxos_config.build(storage).unwrap();
         let initial_strategy = ClusterStrategy {
             leader: id,
             read_quorum_size: omnipaxos.get_read_config().read_quorum_size,
             read_strat: vec![ReadStrategy::default(); nodes.len()],
-            average_latency_estimate: 0.
+            average_latency_estimate: 0.,
         };
         OmniPaxosServer {
             id,
             nodes,
             database: Database::new(),
-            network,
+            network: router,
             omnipaxos,
             current_decided_idx: 0,
             current_leader: None,
@@ -72,10 +67,7 @@ impl OmniPaxosServer {
     }
 
     pub async fn run(&mut self) {
-        // let mut outgoing_interval = tokio::time::interval(Duration::from_millis(3));
-        let mut election_interval = tokio::time::interval(Duration::from_millis(2000));
-        // let mut optimize_interval = tokio::time::interval(Duration::from_millis(2010));
-
+        let mut election_interval = tokio::time::interval(Duration::from_millis(1000));
         loop {
             tokio::select! {
                 biased;
@@ -114,11 +106,15 @@ impl OmniPaxosServer {
             self.strategy.read_quorum_size = self.omnipaxos.get_read_config().read_quorum_size;
             let optimal_strategy = optimizer::find_better_strategy(&self.metrics, &self.strategy);
             if let Some(new_strategy) = optimal_strategy {
-                error!("Found a better strategy: {new_strategy:#?}");
                 if self.optimize && leader == self.id {
+                    error!("Found a better strategy: {new_strategy:#?}");
+                    error!("With metrics: {:?}", self.metrics);
                     let timestamp = Utc::now().timestamp_millis();
                     let strategy_json = serde_json::to_string(&new_strategy).unwrap();
-                    println!("{{ \"timestamp\": {}, \"cluster_strategy\": {}}}", timestamp, strategy_json);
+                    println!(
+                        "{{ \"timestamp\": {}, \"cluster_strategy\": {}}}",
+                        timestamp, strategy_json
+                    );
                     if new_strategy.leader != self.id {
                         error!("Relinquishing leadership to {}", new_strategy.leader);
                         self.omnipaxos.relinquish_leadership(new_strategy.leader);
@@ -291,7 +287,7 @@ impl OmniPaxosServer {
     fn handle_workload_update(&mut self, from: NodeId, reads: u64, writes: u64) {
         self.metrics.update_workload(from, reads, writes);
     }
-    
+
     fn handle_read_strategy_update(&mut self, from: NodeId, read_strat: Vec<ReadStrategy>) {
         if let Some(leader) = self.current_leader {
             if from == leader {
@@ -348,12 +344,13 @@ impl OmniPaxosServer {
             }
         }
     }
-    
+
     async fn send_strat(&mut self) {
         let msg = ClusterMessage::ReadStrategyUpdate(self.strategy.read_strat.clone());
         for peer in self.omnipaxos.get_peers() {
-            self.network.send(Outgoing::ClusterMessage(*peer, msg.clone())).await;
+            self.network
+                .send(Outgoing::ClusterMessage(*peer, msg.clone()))
+                .await;
         }
     }
 }
-

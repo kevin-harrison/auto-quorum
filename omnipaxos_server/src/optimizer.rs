@@ -1,5 +1,4 @@
 use common::messages::ReadStrategy;
-use log::error;
 use omnipaxos::util::NodeId;
 use serde::Serialize;
 
@@ -63,7 +62,14 @@ impl ClusterMetrics {
                 Some(latencies) => {
                     for to in 0..self.latencies.len() {
                         match latencies[to] {
-                            Some(measurement) => self.latencies[from][to] = measurement,
+                            Some(measurement) => {
+                                // TODO: remove, just makes local debugging easier
+                                if measurement == 0 && from != to {
+                                    self.latencies[from][to] = 1;
+                                } else {
+                                    self.latencies[from][to] = measurement;
+                                }
+                            }
                             None => {
                                 let doubled_latency = self.latencies[from][to] * 2;
                                 if doubled_latency > LATENCY_CAP {
@@ -150,20 +156,24 @@ pub fn find_better_strategy(
     }
     match best_parameters {
         Some((leader, read_quorum_size, read_strat)) => {
-            let relative_latency_reduction = min_latency as f64 / current_strategy_latency as f64;
-            if relative_latency_reduction < 0.8 {
-                error!("Better strategy {current_strategy_latency} -> {min_latency}");
-                error!("with metrics {metrics:?}");
-                Some(ClusterStrategy {
-                    average_latency_estimate: min_latency as f64 / metrics.get_total_opertations() as f64,
-                    leader: leader as NodeId + 1,
-                    read_quorum_size,
-                    read_strat,
-                })
-            } else {
-                None
+            let absolute_latency_reduction = current_strategy_latency - min_latency;
+            if absolute_latency_reduction < 3 {
+                return None;
             }
-        },
+            let relative_latency_reduction = min_latency as f64 / current_strategy_latency as f64;
+            if relative_latency_reduction > 0.96 {
+                return None;
+            }
+            // error!("Better strategy {current_strategy_latency} -> {min_latency}");
+            // error!("with metrics {metrics:?}");
+            Some(ClusterStrategy {
+                average_latency_estimate: min_latency as f64
+                    / metrics.get_total_opertations() as f64,
+                leader: leader as NodeId + 1,
+                read_quorum_size,
+                read_strat,
+            })
+        }
         None => None,
     }
 }
