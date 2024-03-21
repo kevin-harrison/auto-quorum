@@ -10,10 +10,7 @@ use omnipaxos::{
 use omnipaxos_storage::memory_storage::MemoryStorage;
 
 use crate::{
-    database::Database,
-    optimizer::{self, ClusterMetrics, ClusterStrategy},
-    read::QuorumReader,
-    router::Router,
+    database::Database, metrics::MetricsHeartbeatServer, optimizer::{self, ClusterStrategy}, read::QuorumReader, router::Router
 };
 use common::{kv::*, messages::*};
 
@@ -28,7 +25,7 @@ pub struct OmniPaxosServer {
     current_decided_idx: usize,
     current_leader: Option<NodeId>,
     quorum_reader: QuorumReader,
-    metrics: ClusterMetrics,
+    metrics_server: MetricsHeartbeatServer,
     strategy: ClusterStrategy,
     optimize: bool,
 }
@@ -38,12 +35,11 @@ impl OmniPaxosServer {
         omnipaxos_config: OmniPaxosConfig,
         storage: MemoryStorage<Command>,
         router: Router,
+        metrics_server: MetricsHeartbeatServer,
         optimize: bool,
     ) -> Self {
         let id = omnipaxos_config.server_config.pid;
         let nodes = omnipaxos_config.cluster_config.nodes.clone();
-        let num_nodes = nodes.len();
-        // let network = Network::new(id, peers).await.unwrap();
         let omnipaxos = omnipaxos_config.build(storage).unwrap();
         let initial_strategy = ClusterStrategy {
             leader: id,
@@ -60,7 +56,7 @@ impl OmniPaxosServer {
             current_decided_idx: 0,
             current_leader: None,
             quorum_reader: QuorumReader::new(id),
-            metrics: ClusterMetrics::new(num_nodes, 1),
+            metrics_server, 
             strategy: initial_strategy,
             optimize,
         }
@@ -72,26 +68,29 @@ impl OmniPaxosServer {
             tokio::select! {
                 biased;
                 _ = election_interval.tick() => {
+                    // TODO: revert BLE to stop tracking latency
                     if let Some(latencies) = self.omnipaxos.tick() {
-                        self.metrics.update_latencies(latencies);
-                        warn!("Metrics = \n{:?}", self.metrics);
-                        let timestamp = Utc::now().timestamp_millis();
-                        let metrics_json = serde_json::to_string(&self.metrics).unwrap();
-                        println!("{{ \"timestamp\": {}, \"cluster_metrics\": {}}}", timestamp, metrics_json);
                         self.current_leader = self.omnipaxos.get_current_leader();
-                        warn!("Leader = {:?} with ballot {:?}\n", self.current_leader, self.omnipaxos.get_promise());
-                        warn!("Readstrat = {:?}", self.strategy.read_strat);
-                        // TODO: revisit order here
+                        // Update metrics
+                        let requests = self.metrics_server.tick();
+                        for (to, request) in requests {
+                            let cluster_msg = ClusterMessage::MetricSync(request);
+                            self.network
+                                .send(Outgoing::ClusterMessage(to, cluster_msg))
+                                .await;
+                            }
+                        // warn!("Metrics = \n{:?}", self.metrics_server.metrics);
+                        // let timestamp = Utc::now().timestamp_millis();
+                        // let metrics_json = serde_json::to_string(&self.metrics_server.metrics).unwrap();
+                        // println!("{{ \"timestamp\": {timestamp}, \"cluster_metrics\": {metrics_json}}}");
+                        // // Debug leader
+                        // warn!("Leader = {:?} with ballot {:?}\n", self.current_leader, self.omnipaxos.get_promise());
+                        // warn!("Readstrat = {:?}", self.strategy.read_strat);
+                        // Check for strategy update
                         self.handle_optimize_timeout().await;
-                        self.send_metrics().await;
                         self.send_outgoing_msgs().await;
                     }
                 },
-                // _ = optimize_interval.tick() => self.handle_optimize_timeout().await,
-                // _ = outgoing_interval.tick() => {
-                //     self.handle_decided_entries().await;
-                //     self.send_outgoing_msgs().await;
-                // },
                 Some(msg) = self.network.next() => {
                     self.handle_incoming_msg(msg.unwrap()).await;
                 },
@@ -104,30 +103,27 @@ impl OmniPaxosServer {
             // TODO: strategy updates should be atomic (possible if we put them in config log)
             self.strategy.leader = leader;
             self.strategy.read_quorum_size = self.omnipaxos.get_read_config().read_quorum_size;
-            let optimal_strategy = optimizer::find_better_strategy(&self.metrics, &self.strategy);
-            if let Some(new_strategy) = optimal_strategy {
-                if self.optimize && leader == self.id {
-                    error!("Found a better strategy: {new_strategy:#?}");
-                    error!("With metrics: {:?}", self.metrics);
+            let new_strategy = optimizer::find_better_strategy(&self.metrics_server.metrics, &self.strategy);
+            match (self.optimize, leader == self.id, new_strategy) {
+                (true, true, Some(strategy)) => {
+                    // Log server state
                     let timestamp = Utc::now().timestamp_millis();
-                    let strategy_json = serde_json::to_string(&new_strategy).unwrap();
-                    println!(
-                        "{{ \"timestamp\": {}, \"cluster_strategy\": {}}}",
-                        timestamp, strategy_json
-                    );
-                    if new_strategy.leader != self.id {
-                        error!("Relinquishing leadership to {}", new_strategy.leader);
-                        self.omnipaxos.relinquish_leadership(new_strategy.leader);
+                    let metrics_json = serde_json::to_string(&self.metrics_server.metrics).unwrap();
+                    let strategy_json = serde_json::to_string(&strategy).unwrap();
+                    println!("{{ \"timestamp\": {timestamp}, \"cluster_metrics\": {metrics_json:<300}, \"cluster_strategy\": {strategy_json:<150}, \"leader\": {leader}, \"new_strat\": {}}}", true);
+                    if strategy.leader != self.id {
+                        self.omnipaxos.relinquish_leadership(strategy.leader);
                         self.send_outgoing_msgs().await;
                     }
-                    if new_strategy.read_quorum_size != self.strategy.read_quorum_size {
+                    // Adopt new strategy
+                    if strategy.read_quorum_size != self.strategy.read_quorum_size {
                         let write_quorum_size =
-                            (self.nodes.len() - new_strategy.read_quorum_size) + 1;
+                            (self.nodes.len() - strategy.read_quorum_size) + 1;
                         let new_config = ClusterConfig {
                             configuration_id: 1,
                             nodes: self.nodes.clone(),
                             flexible_quorum: Some(FlexibleQuorum {
-                                read_quorum_size: new_strategy.read_quorum_size,
+                                read_quorum_size: strategy.read_quorum_size,
                                 write_quorum_size,
                             }),
                         };
@@ -136,12 +132,19 @@ impl OmniPaxosServer {
                             .unwrap();
                         self.send_outgoing_msgs().await;
                     }
-                    if new_strategy.read_strat != self.strategy.read_strat {
-                        self.strategy.read_strat = new_strategy.read_strat;
-                        // TODO: what if this gets dropped? (stubborn send or put in configlog)
+                    if strategy.read_strat != self.strategy.read_strat {
+                        self.strategy.read_strat = strategy.read_strat;
+                        // TODO: what if this gets dropped?
                         self.send_strat().await;
                     }
-                }
+                },
+                _ => {
+                    // Log server state
+                    let timestamp = Utc::now().timestamp_millis();
+                    let metrics_json = serde_json::to_string(&self.metrics_server.metrics).unwrap();
+                    let strategy_json = serde_json::to_string(&self.strategy).unwrap();
+                    println!("{{ \"timestamp\": {timestamp}, \"cluster_metrics\": {metrics_json:<300}, \"cluster_strategy\": {strategy_json:<150}, \"leader\": {leader}, \"new_strat\": {}}}", false);
+                },
             }
         }
     }
@@ -211,7 +214,7 @@ impl OmniPaxosServer {
     async fn handle_incoming_msg(&mut self, msg: Incoming) {
         match msg {
             Incoming::ClientMessage(from, request) => {
-                self.handle_client_request(from, request).await
+                self.handle_client_request(from, request).await;
             }
             Incoming::ClusterMessage(_from, ClusterMessage::OmniPaxosMessage(m)) => {
                 self.omnipaxos.handle_incoming(m);
@@ -219,13 +222,15 @@ impl OmniPaxosServer {
                 self.handle_decided_entries().await;
             }
             Incoming::ClusterMessage(from, ClusterMessage::QuorumReadRequest(req)) => {
-                self.handle_quorum_read_request(from, req).await
+                self.handle_quorum_read_request(from, req).await;
             }
             Incoming::ClusterMessage(_from, ClusterMessage::QuorumReadResponse(resp)) => {
-                self.handle_quorum_read_response(resp).await
+                self.handle_quorum_read_response(resp).await;
             }
-            Incoming::ClusterMessage(from, ClusterMessage::WorkloadUpdate(reads, writes)) => {
-                self.handle_workload_update(from, reads, writes)
+            Incoming::ClusterMessage(from, ClusterMessage::MetricSync(sync)) => {
+                if let Some((to, reply)) = self.metrics_server.handle_metric_sync(from, sync) {
+                    self.network.send(Outgoing::ClusterMessage(to, ClusterMessage::MetricSync(reply))).await;
+                }
             }
             Incoming::ClusterMessage(from, ClusterMessage::ReadStrategyUpdate(strat)) => {
                 self.handle_read_strategy_update(from, strat);
@@ -239,11 +244,11 @@ impl OmniPaxosServer {
                 let read_strat = self.strategy.read_strat[self.id as usize - 1];
                 match (&kv_command, read_strat) {
                     (KVCommand::Get(_), ReadStrategy::QuorumRead) => {
-                        self.metrics.inc_workload_reads(self.id);
+                        self.metrics_server.local_read();
                         self.start_quorum_read(from, command_id, kv_command).await;
                     }
                     _ => {
-                        self.metrics.inc_workload_writes(self.id);
+                        self.metrics_server.local_write();
                         let command = Command {
                             client_id: from,
                             coordinator_id: self.id,
@@ -282,10 +287,6 @@ impl OmniPaxosServer {
         {
             self.update_database_and_respond(vec![ready_read]).await;
         }
-    }
-
-    fn handle_workload_update(&mut self, from: NodeId, reads: u64, writes: u64) {
-        self.metrics.update_workload(from, reads, writes);
     }
 
     fn handle_read_strategy_update(&mut self, from: NodeId, read_strat: Vec<ReadStrategy>) {
@@ -330,18 +331,6 @@ impl OmniPaxosServer {
             });
             let msg = Outgoing::ClusterMessage(*peer, read_request);
             self.network.send(msg).await;
-        }
-    }
-
-    async fn send_metrics(&mut self) {
-        let workload = self.metrics.take_workload(self.id);
-        if let Some(leader) = self.current_leader {
-            if self.id != leader {
-                let msg = ClusterMessage::WorkloadUpdate(workload.reads, workload.writes);
-                self.network
-                    .send(Outgoing::ClusterMessage(leader, msg))
-                    .await;
-            }
         }
     }
 

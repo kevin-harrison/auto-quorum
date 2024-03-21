@@ -2,6 +2,7 @@ use std::{env, fs};
 use crate::server::OmniPaxosServer;
 use common::kv::{Command, NodeId};
 use env_logger;
+use metrics::MetricsHeartbeatServer;
 use omnipaxos::{ballot_leader_election::Ballot, storage::Storage, OmniPaxosConfig};
 use omnipaxos_storage::memory_storage::MemoryStorage;
 use router::Router;
@@ -10,6 +11,7 @@ use toml;
 
 mod database;
 mod optimizer;
+mod metrics;
 mod read;
 mod router;
 mod server;
@@ -38,7 +40,8 @@ pub async fn main() {
     let local_deployment = server_config.local_deployment.unwrap_or(false);
     let congestion_control = server_config.congestion_control.unwrap_or(false);
     let optimize = server_config.optimize.unwrap_or(true);
-    let router = Router::new(server_id, nodes, local_deployment, congestion_control).await.unwrap();
+    let router = Router::new(server_id, nodes.clone(), local_deployment, congestion_control).await.unwrap();
+    let metrics = MetricsHeartbeatServer::new(server_id, nodes);
     let mut storage: MemoryStorage<Command> = MemoryStorage::default();
     // Hack to set an initial leader for the cluster
     let saved_promise = storage.get_promise().unwrap();
@@ -49,6 +52,6 @@ pub async fn main() {
         }
         _ => (),
     }
-    let mut server = OmniPaxosServer::new(omnipaxos_config, storage, router, optimize).await;
+    let mut server = OmniPaxosServer::new(omnipaxos_config, storage, router, metrics, optimize).await;
     server.run().await;
 }

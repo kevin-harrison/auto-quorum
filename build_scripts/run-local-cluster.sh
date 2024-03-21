@@ -10,7 +10,7 @@ cluster_size=$1
 
 rm -rf ../../auto-quorum-benchmark/logs/test-local*
 for ((i = 1; i <= cluster_size; i++)); do
-    RUST_LOG=debug CONFIG_FILE=server-${i}-config.toml cargo run --release --manifest-path="../omnipaxos_server/Cargo.toml" 1> ../../auto-quorum-benchmark/logs/test-local_server-${i}.log &
+    RUST_LOG=debug CONFIG_FILE=server-${i}-config.toml cargo run --manifest-path="../omnipaxos_server/Cargo.toml" 1> ../../auto-quorum-benchmark/logs/test-local_server-${i}.log &
 done
 wait
 

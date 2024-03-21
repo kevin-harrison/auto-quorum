@@ -37,9 +37,8 @@ pub enum ClusterMessage {
     OmniPaxosMessage(OmniPaxosMessage<Command>),
     QuorumReadRequest(QuorumReadRequest),
     QuorumReadResponse(QuorumReadResponse),
-    // Reads, writes
-    WorkloadUpdate(u64, u64),
     ReadStrategyUpdate(Vec<ReadStrategy>),
+    MetricSync(MetricSync),
 }
 
 // next
@@ -71,6 +70,17 @@ pub struct QuorumReadResponse {
     pub accepted_idx: usize,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum MetricSync {
+    MetricRequest(u64),
+    MetricReply(u64, MetricUpdate)
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MetricUpdate {
+    pub latency: Vec<f64>,
+    pub load: (f64, f64),
+} 
 
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ReadStrategy {

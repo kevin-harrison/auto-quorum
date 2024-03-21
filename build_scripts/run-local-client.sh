@@ -9,5 +9,5 @@ trap "kill_children" SIGINT
 
 server_id=$1
 other_id=$2
-CONFIG_FILE=./client-${server_id}-config.toml  cargo run --release --manifest-path="../omnipaxos_client/Cargo.toml" 1> ../../auto-quorum-benchmark/logs/test-local_client-${server_id}.log &
-CONFIG_FILE=./client-${other_id}-config.toml  cargo run --release --manifest-path="../omnipaxos_client/Cargo.toml" 1> ../../auto-quorum-benchmark/logs/test-local_client-${other_id}.log
+CONFIG_FILE=./client-${server_id}-config.toml  cargo run --manifest-path="../omnipaxos_client/Cargo.toml" 1> ../../auto-quorum-benchmark/logs/test-local_client-${server_id}.log &
+CONFIG_FILE=./client-${other_id}-config.toml  cargo run --manifest-path="../omnipaxos_client/Cargo.toml" 1> ../../auto-quorum-benchmark/logs/test-local_client-${other_id}.log
