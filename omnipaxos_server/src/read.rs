@@ -100,7 +100,9 @@ impl QuorumReader {
     pub fn rinse(&mut self, decided_idx: usize) -> Vec<Command> {
         let mut result = vec![];
         while !self.ready_reads.is_empty() {
-            if self.ready_reads[0].read_idx >= decided_idx {
+            // TODO: this condition was >= before. I can't think of why...
+            // if self.ready_reads[0].read_idx >= decided_idx {
+            if self.ready_reads[0].read_idx > decided_idx {
                 break;
             } else {
                 let ready = self.ready_reads.pop_front().unwrap();

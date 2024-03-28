@@ -1,9 +1,8 @@
 use chrono::Utc;
 use futures::SinkExt;
 use rand::Rng;
-use serde::Serialize;
 use std::time::Duration;
-use serde::Deserialize;
+use serde::{Serialize, Deserialize};
 
 use tokio::time::interval;
 use tokio::net::TcpStream;
@@ -24,15 +23,17 @@ struct Response {
     message: ServerMessage,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ClientConfig {
+    location: String,
     server_id: u64,
     read_ratio: f64,
     request_rate_intervals: Vec<RequestInterval>,
     local_deployment: Option<bool>,
+    pub scheduled_start_utc_ms: Option<i64>,
 }
 
-#[derive(Debug, Deserialize, Clone, Copy)]
+#[derive(Debug, Serialize, Deserialize, Clone, Copy)]
 pub struct RequestInterval {
     duration_sec: u64,
     requests_per_sec: u64,
@@ -164,10 +165,6 @@ impl Client {
         for request_data in &self.request_data {
             let request_json = serde_json::to_string(request_data).unwrap();
             println!("{request_json}");
-            // println!(
-            //     "{:?} {:?}",
-            //     request_data.time_sent_utc, request_data.response
-            // );
         }
     }
 }

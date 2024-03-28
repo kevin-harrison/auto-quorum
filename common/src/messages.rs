@@ -72,7 +72,7 @@ pub struct QuorumReadResponse {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum MetricSync {
-    MetricRequest(u64),
+    MetricRequest(u64, MetricUpdate),
     MetricReply(u64, MetricUpdate)
 }
 

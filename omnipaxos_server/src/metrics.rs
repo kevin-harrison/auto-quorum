@@ -32,6 +32,7 @@ pub struct MetricsHeartbeatServer {
 
 #[derive(Serialize)]
 pub struct ClusterMetrics {
+    // TODO: assumes continuous server ids
     pub num_nodes: usize,
     pub latencies: Vec<Vec<f64>>,
     pub workload: Vec<Load>,
@@ -56,9 +57,10 @@ impl std::fmt::Debug for ClusterMetrics {
 }
 
 impl ClusterMetrics {
-    pub fn quorum_latencies(&self, node: usize) -> Vec<f64> {
-        let mut latencies = self.latencies[node].clone();
-        latencies.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    pub fn quorum_latencies(&self, node: usize) -> Vec<(usize, f64)> {
+        let mut latencies: Vec<(usize, f64)> = self.latencies[node].iter().cloned().enumerate().collect();
+        // let mut latencies = self.latencies[node].clone();
+        latencies.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
         latencies
     }
 
@@ -86,8 +88,8 @@ impl MetricsHeartbeatServer {
             metrics: initial_metrics,
             pid,
             peers,
-            latency_smoothing_factor: 0.90,
-            workload_smoothing_factor: 0.8,
+            latency_smoothing_factor: 0.9,
+            workload_smoothing_factor: 0.9,
             local_reads: 0.,
             local_writes: 0.,
             round: 0,
@@ -105,8 +107,13 @@ impl MetricsHeartbeatServer {
     }
 
     pub fn handle_metric_sync(&mut self, from: NodeId, metric_sync: MetricSync) -> Option<(NodeId, MetricSync)> {
+        let from_idx = from as usize - 1;
         match metric_sync {
-            MetricSync::MetricRequest(round) => {
+            MetricSync::MetricRequest(round, metric_update) => {
+                // Also collect workload metric from request to reduce metric gathering latency
+                // Don't have to worry about stale metric since TCP gives ordering
+                self.metrics.workload[from_idx].reads = metric_update.load.0;
+                self.metrics.workload[from_idx].writes = metric_update.load.1;
                 let current_metrics = MetricUpdate {
                     latency: self.my_latency().clone(),
                     load: self.my_load_tuple(),
@@ -116,7 +123,6 @@ impl MetricsHeartbeatServer {
             },
             MetricSync::MetricReply(round, metric_update) => {
                 if round == self.round {
-                    let from_idx = from as usize - 1;
                     let reply_latency = self.get_round_delay();
                     let my_latency = &mut self.metrics.latencies[self.pid as usize - 1][from_idx];
                     *my_latency += self.latency_smoothing_factor * (reply_latency - *my_latency);
@@ -131,6 +137,10 @@ impl MetricsHeartbeatServer {
     }
 
     pub fn tick(&mut self) -> Vec<(NodeId, MetricSync)> {
+        if self.round == 0 {
+            return self.next_round();
+        }
+
         // Update local workload measurement
         let load = &mut self.metrics.workload[self.pid as usize - 1];
         let local_reads = std::mem::take(&mut self.local_reads);
@@ -162,11 +172,18 @@ impl MetricsHeartbeatServer {
             }
         }
 
-        // Start next round
+        self.next_round()
+    }
+
+    fn next_round(&mut self) -> Vec<(NodeId, MetricSync)> {
         self.round += 1;
         self.round_start = Instant::now();
-        let requests = self.peers.iter().map(|peer| (*peer, MetricSync::MetricRequest(self.round))).collect();
-        requests
+        let request_metric = MetricUpdate {
+            latency: vec![],
+            load: self.my_load_tuple(),
+        };
+        let round_requests = self.peers.iter().map(|peer| (*peer, MetricSync::MetricRequest(self.round, request_metric.clone()))).collect();
+        round_requests
     }
 
     fn my_latency(&self) -> &Vec<f64> {

@@ -73,12 +73,14 @@ impl Router {
             }
         } else {
             warn!("Not connected to node {to}");
+            // TODO: This doesn't work sometimes
             // If HeartbeatRequest msg is what failed, try to reconnect to node.
-            if let ClusterMessage::OmniPaxosMessage(OmniPaxosMessage::BLE(m)) = msg {
+            if let ClusterMessage::OmniPaxosMessage(OmniPaxosMessage::BLE(m)) = &msg {
                 if let BLEMsg::HeartbeatRequest(_) = m.msg {
-                    if m.to == to && to < self.id {
-                        if let Err(err) = self.add_node(to).await {
-                            warn!("Couldn't connect to node {to}: {err}");
+                    if to < self.id {
+                        let resend_msg = Some(NetworkMessage::ClusterMessage(msg));
+                        if let Err(err) = self.add_node(to, resend_msg).await {
+                            warn!("Couldn't reconnect to node {to}: {err}");
                         };
                     }
                 }
@@ -100,7 +102,7 @@ impl Router {
         }
     }
 
-    async fn add_node(&mut self, node: NodeId) -> Result<(), Error> {
+    async fn add_node(&mut self, node: NodeId, send_msg: Option<NetworkMessage>) -> Result<(), Error> {
         let address = get_node_addr(node, self.is_local)?;
         let tcp_stream = TcpStream::connect(address).await?;
         if !self.congestion_control {
@@ -110,6 +112,9 @@ impl Router {
         framed_stream
             .send(NetworkMessage::NodeRegister(self.id))
             .await?;
+        if let Some(msg) = send_msg {
+            framed_stream.send(msg).await?;
+        }
         self.nodes.insert(node, framed_stream);
         return Ok(());
     }
@@ -193,7 +198,7 @@ impl Stream for Router {
                 }
                 Poll::Ready(None) => {
                     //Finished
-                    debug!("Node `{}` disconnecting", id);
+                    debug!("Node/Client `{}` disconnecting", id);
                 }
                 Poll::Ready(Some(Err(err))) => {
                     //Error
