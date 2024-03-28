@@ -57,13 +57,6 @@ impl std::fmt::Debug for ClusterMetrics {
 }
 
 impl ClusterMetrics {
-    pub fn quorum_latencies(&self, node: usize) -> Vec<(usize, f64)> {
-        let mut latencies: Vec<(usize, f64)> = self.latencies[node].iter().cloned().enumerate().collect();
-        // let mut latencies = self.latencies[node].clone();
-        latencies.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
-        latencies
-    }
-
     pub fn get_total_load(&self) -> f64 {
         self.workload
             .iter()

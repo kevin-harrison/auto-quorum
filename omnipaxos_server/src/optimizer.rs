@@ -1,112 +1,314 @@
-use common::messages::ReadStrategy;
 use common::kv::NodeId;
 use serde::Serialize;
 
-use crate::metrics::ClusterMetrics;
+use crate::metrics::{ClusterMetrics, Load};
 
 // TODO: make this a config setting
 const FAILURE_TOLERANCE: usize = 1;
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 pub struct ClusterStrategy {
     pub average_latency_estimate: f64,
     pub leader: NodeId,
     pub read_quorum_size: usize,
-    pub read_strat: Vec<ReadStrategy>,
+    pub node_strategies: Vec<NodeStrategy>,
 }
 
-pub fn find_better_strategy(
-    metrics: &ClusterMetrics,
-    current_strategy: &mut ClusterStrategy,
-) -> Option<ClusterStrategy> {
-    let mut quorum_latencies = vec![];
-    for node in 0..metrics.num_nodes {
-        quorum_latencies.push(metrics.quorum_latencies(node));
-    }
-
-    let current_leader_idx = current_strategy.leader as usize - 1;
-    let (current_strategy_latency, _) = get_latency(
-        metrics,
-        &quorum_latencies,
-        current_leader_idx,
-        current_strategy.read_quorum_size,
-    );
-    current_strategy.average_latency_estimate = current_strategy_latency / metrics.get_total_load();
-    let mut min_latency = current_strategy_latency;
-    let mut best_parameters = None;
-    for leader_node in 0..metrics.num_nodes {
-        for read_quorum_size in
-            FAILURE_TOLERANCE + 1..=metrics.num_nodes - FAILURE_TOLERANCE
-        {
-            let (latency, read_strats) =
-                get_latency(metrics, &quorum_latencies, leader_node, read_quorum_size);
-            if latency < min_latency {
-                min_latency = latency;
-                best_parameters = Some((leader_node, read_quorum_size, read_strats));
-            }
-            // println!("Total latency: {total_latency}\n");
+impl ClusterStrategy {
+    pub fn new(leader: NodeId, read_quorum_size: usize) -> Self {
+        Self {
+            average_latency_estimate: 0.,
+            leader,
+            read_quorum_size,
+            node_strategies: vec![NodeStrategy::default()],
         }
-    }
-    match best_parameters {
-        Some((leader, read_quorum_size, read_strat)) => {
-            if read_strat.contains(&ReadStrategy::QuorumRead) {
-                log::error!("Found best strat with q-read: {} {read_quorum_size} {read_strat:?}", leader+1);
-            }
-            let absolute_latency_reduction = current_strategy_latency - min_latency;
-            if absolute_latency_reduction < 3. {
-                return None;
-            }
-            let relative_latency_reduction = min_latency / current_strategy_latency;
-            if relative_latency_reduction > 0.97 {
-                return None;
-            }
-            Some(ClusterStrategy {
-                average_latency_estimate: min_latency
-                    / metrics.get_total_load(),
-                leader: leader as NodeId + 1,
-                read_quorum_size,
-                read_strat,
-            })
-        }
-        None => None,
     }
 }
 
-fn get_latency(
-    metrics: &ClusterMetrics,
-    quorum_latencies: &Vec<Vec<(usize, f64)>>,
-    leader: usize,
-    read_quorum_size: usize,
-) -> (f64, Vec<ReadStrategy>) {
-    let write_quorum_size = metrics.num_nodes - read_quorum_size + 1;
-    // println!("Testing leader={leader_node}, read_quorum={read_quorum_size}");
-    let mut total_latency = 0.;
-    let mut read_strats = vec![ReadStrategy::default(); metrics.num_nodes];
-    for node in 0..metrics.num_nodes {
-        if metrics.workload[node].reads == 0. && metrics.workload[node].writes == 0. {
-            continue;
-        }
-        let to_leader_rtt = metrics.latencies[node][leader];
-        let leader_write_latency = quorum_latencies[leader][write_quorum_size - 1].1;
-        let write_latency = to_leader_rtt + leader_write_latency;
-        
-        // TODO: leader shouldn't have to wait if reads look at ballots (need to add to add this to reading logic)
-        let (bottleneck_node, read_quorum_latency_no_wait) = quorum_latencies[node][read_quorum_size - 1];
-        let worst_case_dec_idx_delay = leader_write_latency - (metrics.latencies[leader][bottleneck_node] / 2.) + (to_leader_rtt / 2.);
-        let read_quorum_latency_with_wait = (read_quorum_latency_no_wait / 2.) + worst_case_dec_idx_delay;
-        let read_quorum_latency = read_quorum_latency_no_wait.max(read_quorum_latency_with_wait);
+#[derive(Debug, Serialize, Clone, Copy, Default)]
+pub struct NodeStrategy {
+    pub write_latency: f64,
+    pub read_latency: f64,
+    pub read_strategy: ReadStrategy,
+}
 
-        if write_latency < read_quorum_latency {
-            read_strats[node] = ReadStrategy::ReadAsWrite;
-            total_latency +=
-                (metrics.workload[node].reads + metrics.workload[node].writes) * write_latency;
-            // println!("Node {node}: write_lat={write_latency}");
+impl Eq for NodeStrategy {}
+
+impl PartialEq for NodeStrategy {
+    fn eq(&self, other: &Self) -> bool {
+        self.read_strategy == other.read_strategy
+    }
+}
+
+#[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ReadStrategy {
+    #[default]
+    ReadAsWrite,
+    QuorumRead,
+    LeaderRead,
+    ProxiedLeaderRead,
+}
+
+pub struct ClusterOptimizer {
+    optimal_strategy: ClusterStrategy,
+    num_nodes: usize,
+    cached_latencies: Vec<Vec<f64>>,
+    // rows = leader, cols = read quorum_size, depth = node
+    cached_strats: Vec<Vec<Vec<NodeStrategy>>>,
+    read_quorum_indices: Vec<usize>,
+    invalidate_cache_threshold: f64,
+}
+
+impl ClusterOptimizer {
+    pub fn new(nodes: Vec<NodeId>, initial_strategy: ClusterStrategy) -> ClusterOptimizer {
+        let num_nodes = nodes.len();
+        let read_quorum_indices: Vec<usize> =
+            (FAILURE_TOLERANCE + 1..=num_nodes - FAILURE_TOLERANCE).collect();
+        let num_quorum_options = read_quorum_indices.len();
+        ClusterOptimizer {
+            optimal_strategy: initial_strategy,
+            num_nodes,
+            cached_latencies: vec![vec![0.; num_nodes]; num_nodes],
+            cached_strats: vec![
+                vec![vec![NodeStrategy::default(); num_nodes]; num_quorum_options];
+                num_nodes
+            ],
+            read_quorum_indices,
+            invalidate_cache_threshold: 5.,
+        }
+    }
+
+    pub fn update_optimal_strategy(&mut self, metrics: &ClusterMetrics) -> &ClusterStrategy {
+        self.validate_cache(&metrics.latencies);
+        let current_leader_idx = self.optimal_strategy.leader as usize - 1;
+        let current_read_quorum_idx = self.optimal_strategy.read_quorum_size - 1;
+        let mut best_latency = self.get_latency(
+            &metrics.workload,
+            current_leader_idx,
+            current_read_quorum_idx,
+        );
+        for leader_idx in 0..self.num_nodes {
+            for (quorum_cache_idx, read_quorum_idx) in
+                self.read_quorum_indices.iter().enumerate()
+            {
+                let latency = self.get_latency(&metrics.workload, leader_idx, quorum_cache_idx);
+                if latency < best_latency {
+                    best_latency = latency;
+                    self.optimal_strategy.leader = leader_idx as NodeId + 1;
+                    self.optimal_strategy.read_quorum_size = read_quorum_idx + 1;
+                    self.optimal_strategy.average_latency_estimate =
+                        latency / metrics.get_total_load();
+                }
+            }
+        }
+        &self.optimal_strategy
+    }
+
+    fn get_latency(&self, workload: &Vec<Load>, leader_idx: usize, quorum_idx: usize) -> f64 {
+        let mut total_latency = 0.;
+        for node in 0..self.num_nodes {
+            total_latency += workload[node].writes
+                * self.cached_strats[leader_idx][quorum_idx][node].write_latency;
+            total_latency += workload[node].reads
+                * self.cached_strats[leader_idx][quorum_idx][node].read_latency;
+        }
+        total_latency
+    }
+
+    fn validate_cache(&mut self, new_latencies: &Vec<Vec<f64>>) {
+        if !self.validate_cached_latencies(new_latencies) {
+            return;
+        }
+        let quorum_latencies = self.calculate_quorum_latencies();
+        for leader in 0..self.cached_strats.len() {
+            for (quorum_cache_idx, read_quorum_idx) in
+                self.read_quorum_indices.iter().cloned().enumerate()
+            {
+                let write_quorum_idx = self.calculate_write_quorum_idx(read_quorum_idx);
+                for node in 0..self.num_nodes {
+                    // Read as write
+                    let to_leader_rtt = self.cached_latencies[node][leader];
+                    let leader_write_latency = quorum_latencies[leader][write_quorum_idx].1;
+                    let write_latency = to_leader_rtt + leader_write_latency;
+                    let mut best_strategy = ReadStrategy::ReadAsWrite;
+                    let mut best_strategy_latency = write_latency;
+
+                    // Quorum read
+                    let read_quorum = &quorum_latencies[node][0..read_quorum_idx];
+                    let (node_to_most_updated_latency, leader_to_most_updated_latency) = quorum_latencies[leader]
+                        .iter()
+                        .find_map(|(id, leader_to_most_updated_latency)| {
+                            read_quorum.iter().find(|(r_id, _)| r_id == id).map(
+                                |(_, node_to_most_updated_latency)| {
+                                    (
+                                        node_to_most_updated_latency / 2.,
+                                        leader_to_most_updated_latency / 2.,
+                                    )
+                                },
+                            )
+                        })
+                        .unwrap();
+                    let read_quorum_latency_no_wait = quorum_latencies[node][read_quorum_idx].1;
+                    let read_quorum_latency_with_wait = node_to_most_updated_latency
+                        + leader_write_latency
+                        - leader_to_most_updated_latency
+                        + (to_leader_rtt / 2.);
+                    let read_quorum_latency =
+                        read_quorum_latency_no_wait.max(read_quorum_latency_with_wait);
+                    if read_quorum_latency < best_strategy_latency {
+                        best_strategy = ReadStrategy::QuorumRead;
+                        best_strategy_latency = read_quorum_latency;
+                    }
+
+                    // TODO: Leader reads
+                    // // Leader read
+                    // let leader_read_latency = quorum_latencies[leader][read_quorum_idx].1;
+                    // let proxy_leader_read_latency = to_leader_rtt + leader_read_latency;
+                    // if node == leader {
+                    //     if leader_read_latency < best_strategy_latency {
+                    //         best_strategy = ReadStrategy::LeaderRead;
+                    //         best_strategy_latency = leader_read_latency;
+                    //     }
+                    // } else {
+                    //     if proxy_leader_read_latency < best_strategy_latency {
+                    //         best_strategy = ReadStrategy::ProxiedLeaderRead;
+                    //         best_strategy_latency = proxy_leader_read_latency;
+                    //     }
+                    // }
+
+                    self.cached_strats[leader][quorum_cache_idx][node] = NodeStrategy {
+                        write_latency,
+                        read_strategy: best_strategy,
+                        read_latency: best_strategy_latency,
+                    };
+                }
+            }
+        }
+    }
+
+    fn validate_cached_latencies(&mut self, new_latencies: &Vec<Vec<f64>>) -> bool {
+        let mut change_in_latency = 0.;
+        for i in 0..self.num_nodes {
+            for j in 0..self.num_nodes {
+                change_in_latency += (new_latencies[i][j] - self.cached_latencies[i][j]).abs();
+            }
+        }
+        if change_in_latency < self.invalidate_cache_threshold {
+            return true;
         } else {
-            // println!("Node {node}: write_lat={write_latency} read_lat={quorum_read_latency}");
-            read_strats[node] = ReadStrategy::QuorumRead;
-            total_latency += (metrics.workload[node].reads * read_quorum_latency)
-                + (metrics.workload[node].writes * write_latency);
+            self.cached_latencies = new_latencies.clone();
+            return false;
         }
     }
-    (total_latency, read_strats)
+
+    fn calculate_quorum_latencies(&self) -> Vec<Vec<(usize, f64)>> {
+        let mut quorum_latencies = vec![];
+        for node_latency in self.cached_latencies.iter() {
+            let mut quorum_latency: Vec<(usize, f64)> =
+                node_latency.iter().cloned().enumerate().collect();
+            quorum_latency.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+            quorum_latencies.push(quorum_latency);
+        }
+        quorum_latencies
+    }
+
+    fn calculate_write_quorum_idx(&self, read_quorum_idx: usize) -> usize {
+        self.num_nodes - read_quorum_idx - 1
+    }
 }
+
+// pub fn find_better_strategy(
+//     metrics: &ClusterMetrics,
+//     current_strategy: &mut ClusterStrategy,
+// ) -> Option<ClusterStrategy> {
+//     let mut quorum_latencies = vec![];
+//     for node in 0..metrics.num_nodes {
+//         quorum_latencies.push(metrics.quorum_latencies(node));
+//     }
+//
+//     let current_leader_idx = current_strategy.leader as usize - 1;
+//     let (current_strategy_latency, _) = get_latency(
+//         metrics,
+//         &quorum_latencies,
+//         current_leader_idx,
+//         current_strategy.read_quorum_size,
+//     );
+//     current_strategy.average_latency_estimate = current_strategy_latency / metrics.get_total_load();
+//     let mut min_latency = current_strategy_latency;
+//     let mut best_parameters = None;
+//     for leader_node in 0..metrics.num_nodes {
+//         for read_quorum_size in
+//             FAILURE_TOLERANCE + 1..=metrics.num_nodes - FAILURE_TOLERANCE
+//         {
+//             let (latency, read_strats) =
+//                 get_latency(metrics, &quorum_latencies, leader_node, read_quorum_size);
+//             if latency < min_latency {
+//                 min_latency = latency;
+//                 best_parameters = Some((leader_node, read_quorum_size, read_strats));
+//             }
+//             // println!("Total latency: {total_latency}\n");
+//         }
+//     }
+//     match best_parameters {
+//         Some((leader, read_quorum_size, read_strat)) => {
+//             if read_strat.contains(&ReadStrategy::QuorumRead) {
+//                 log::error!("Found best strat with q-read: {} {read_quorum_size} {read_strat:?}", leader+1);
+//             }
+//             let absolute_latency_reduction = current_strategy_latency - min_latency;
+//             if absolute_latency_reduction < 3. {
+//                 return None;
+//             }
+//             let relative_latency_reduction = min_latency / current_strategy_latency;
+//             if relative_latency_reduction > 0.97 {
+//                 return None;
+//             }
+//             Some(ClusterStrategy {
+//                 average_latency_estimate: min_latency
+//                     / metrics.get_total_load(),
+//                 leader: leader as NodeId + 1,
+//                 read_quorum_size,
+//                 read_strat,
+//             })
+//         }
+//         None => None,
+//     }
+// }
+//
+// fn get_latency(
+//     metrics: &ClusterMetrics,
+//     quorum_latencies: &Vec<Vec<(usize, f64)>>,
+//     leader: usize,
+//     read_quorum_size: usize,
+// ) -> (f64, Vec<ReadStrategy>) {
+//     let write_quorum_size = metrics.num_nodes - read_quorum_size + 1;
+//     // println!("Testing leader={leader_node}, read_quorum={read_quorum_size}");
+//     let mut total_latency = 0.;
+//     let mut read_strats = vec![ReadStrategy::default(); metrics.num_nodes];
+//     for node in 0..metrics.num_nodes {
+//         if metrics.workload[node].reads == 0. && metrics.workload[node].writes == 0. {
+//             continue;
+//         }
+//         let to_leader_rtt = metrics.latencies[node][leader];
+//         let leader_write_latency = quorum_latencies[leader][write_quorum_size - 1].1;
+//         let write_latency = to_leader_rtt + leader_write_latency;
+//
+//         // TODO: leader shouldn't have to wait if reads look at ballots (need to add to add this to reading logic)
+//         let (bottleneck_node, read_quorum_latency_no_wait) = quorum_latencies[node][read_quorum_size - 1];
+//         let worst_case_dec_idx_delay = leader_write_latency - (metrics.latencies[leader][bottleneck_node] / 2.) + (to_leader_rtt / 2.);
+//         let read_quorum_latency_with_wait = (read_quorum_latency_no_wait / 2.) + worst_case_dec_idx_delay;
+//         let read_quorum_latency = read_quorum_latency_no_wait.max(read_quorum_latency_with_wait);
+//
+//         if write_latency < read_quorum_latency {
+//             read_strats[node] = ReadStrategy::ReadAsWrite;
+//             total_latency +=
+//                 (metrics.workload[node].reads + metrics.workload[node].writes) * write_latency;
+//             // println!("Node {node}: write_lat={write_latency}");
+//         } else {
+//             // println!("Node {node}: write_lat={write_latency} read_lat={quorum_read_latency}");
+//             read_strats[node] = ReadStrategy::QuorumRead;
+//             total_latency += (metrics.workload[node].reads * read_quorum_latency)
+//                 + (metrics.workload[node].writes * write_latency);
+//         }
+//     }
+//     (total_latency, read_strats)
+// }
