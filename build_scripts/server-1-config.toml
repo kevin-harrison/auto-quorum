@@ -1,6 +1,7 @@
 location = "local-1"
 initial_leader = 1
 local_deployment = true
+optimize = OPTIMIZE
 
 [cluster_config]
 configuration_id = 1
