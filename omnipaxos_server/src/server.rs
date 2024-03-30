@@ -11,7 +11,7 @@ use omnipaxos::{
 use omnipaxos_storage::memory_storage::MemoryStorage;
 
 use crate::{
-    database::Database, metrics::MetricsHeartbeatServer, optimizer::{self, ClusterOptimizer, ClusterStrategy, ReadStrategy}, read::QuorumReader, router::Router
+    database::Database, metrics::MetricsHeartbeatServer, optimizer::{ClusterOptimizer, ClusterStrategy}, read::QuorumReader, router::Router
 };
 use common::{kv::*, messages::*};
 
@@ -54,8 +54,14 @@ impl OmniPaxosServer {
         let omnipaxos = omnipaxos_config.build(storage).unwrap();
         let router = Router::new(server_id, nodes.clone(), local_deployment, congestion_control).await.unwrap();
         let metrics_server = MetricsHeartbeatServer::new(server_id, nodes.clone());
-        let initial_strategy = ClusterStrategy::new(server_id, omnipaxos.get_read_config().read_quorum_size);
-        let optimizer = ClusterOptimizer::new(nodes.clone(), initial_strategy.clone());
+        let init_read_quorum = omnipaxos.get_read_config().read_quorum_size;
+        let init_strat = ClusterStrategy {
+            leader: server_id,
+            read_quorum_size: init_read_quorum,
+            write_quorum_size: nodes.len() - init_read_quorum + 1,
+            read_strategies: vec![ReadStrategy::default(); nodes.len()],
+        };
+        let optimizer = ClusterOptimizer::new(nodes.clone());
         let mut server = OmniPaxosServer {
             id: server_id,
             nodes,
@@ -65,8 +71,8 @@ impl OmniPaxosServer {
             current_decided_idx: 0,
             quorum_reader: QuorumReader::new(server_id),
             metrics_server, 
-            strategy: initial_strategy,
             optimizer,
+            strategy: init_strat,
             optimize,
         };
         server.send_outgoing_msgs().await;
@@ -116,48 +122,51 @@ impl OmniPaxosServer {
 
     async fn handle_optimize_timeout(&mut self) {
         if !self.optimize {
-            self.print_metrics(false, false, false);
+            self.log(None, false);
             return;
         }
         if let Some(leader) = self.omnipaxos.get_current_leader() {
             self.strategy.leader = leader;
             self.strategy.read_quorum_size = self.omnipaxos.get_read_config().read_quorum_size;
-            let optimal_strategy = self.optimizer.update_optimal_strategy(&self.metrics_server.metrics);
-            let new_node_strategies = self.strategy.node_strategies != optimal_strategy.node_strategies;
-            let new_optimal_leader = self.strategy.leader != optimal_strategy.leader;
-            let new_optimal_quorum = self.strategy.read_quorum_size != optimal_strategy.read_quorum_size;
-            let optimal_read_quorum_size = optimal_strategy.read_quorum_size;
-            if new_node_strategies {
-                // Update node strategies locally since it doesn't matter for safety
-                self.strategy.node_strategies = optimal_strategy.node_strategies.clone();
+            // Only leader has to do this, but for logs we do it anyways
+            let (optimal_strategy, optimal_strategy_latency) = 
+                self.optimizer.calculate_optimal_strategy(&self.metrics_server.metrics);
+            let current_strategy_latency = 
+                self.optimizer.score_strategy(&self.metrics_server.metrics, &self.strategy);
+            if leader == self.id {
+                if optimal_strategy_latency / current_strategy_latency < 0.97 {
+                    if optimal_strategy.leader != leader {
+                        self.omnipaxos.relinquish_leadership(optimal_strategy.leader);
+                        self.send_outgoing_msgs().await;
+                    }
+                    if optimal_strategy.read_quorum_size != self.strategy.read_quorum_size {
+                        let write_quorum_size =
+                            (self.nodes.len() - optimal_strategy.read_quorum_size) + 1;
+                        let new_config = ClusterConfig {
+                            configuration_id: 1,
+                            nodes: self.nodes.clone(),
+                            flexible_quorum: Some(FlexibleQuorum {
+                                read_quorum_size: optimal_strategy.read_quorum_size,
+                                write_quorum_size,
+                            }),
+                        };
+                        self.omnipaxos
+                            .reconfigure_joint_consensus(new_config)
+                            .unwrap();
+                        self.send_outgoing_msgs().await;
+                    }
+                    if optimal_strategy.read_strategies != self.strategy.read_strategies {
+                        self.strategy.read_strategies = optimal_strategy.read_strategies.clone();
+                        self.send_strat().await;
+                    }
+                    self.log(Some((&optimal_strategy, optimal_strategy_latency)), true);
+                } else {
+                    self.log(Some((&self.strategy, current_strategy_latency)), false);
+                }
+            } else {
+                self.log(None, false)
             }
-            // Only the leader should try to reconfigure the log
-            if leader != self.id {
-                self.print_metrics(false, false, new_node_strategies);
-                return;
-            }
-            if new_optimal_leader { 
-                self.omnipaxos.relinquish_leadership(optimal_strategy.leader);
-                self.send_outgoing_msgs().await;
-            }
-            if new_optimal_quorum {
-                let write_quorum_size =
-                    (self.nodes.len() - optimal_read_quorum_size) + 1;
-                let new_config = ClusterConfig {
-                    configuration_id: 1,
-                    nodes: self.nodes.clone(),
-                    flexible_quorum: Some(FlexibleQuorum {
-                        read_quorum_size: optimal_read_quorum_size,
-                        write_quorum_size,
-                    }),
-                };
-                self.omnipaxos
-                    .reconfigure_joint_consensus(new_config)
-                    .unwrap();
-                self.send_outgoing_msgs().await;
-            }
-            self.print_metrics(new_optimal_leader, new_optimal_quorum, new_node_strategies);
-
+        }
             // let new_strategy = optimizer::find_better_strategy(&self.metrics_server.metrics, &mut self.strategy);
             // match (self.optimize, leader == self.id, new_strategy) {
             //     (true, true, Some(strategy)) => {
@@ -200,7 +209,6 @@ impl OmniPaxosServer {
             //         println!("{{ \"timestamp\": {timestamp}, \"cluster_metrics\": {metrics_json:<300}, \"cluster_strategy\": {strategy_json:<150}, \"leader\": {leader}, \"new_strat\": {}}}", false);
             //     },
             // }
-        }
     }
 
     async fn force_initial_leader_switch(&mut self, initial_leader: NodeId) {
@@ -295,6 +303,9 @@ impl OmniPaxosServer {
                     self.network.send(Outgoing::ClusterMessage(to, ClusterMessage::MetricSync(reply))).await;
                 }
             }
+            Incoming::ClusterMessage(from, ClusterMessage::ReadStrategyUpdate(strat)) => {
+                self.handle_read_strategy_update(from, strat);
+            }
         }
     }
 
@@ -320,11 +331,11 @@ impl OmniPaxosServer {
     }
 
     async fn handle_read_request(&mut self, from: ClientId, command_id: CommandId, kv_command: KVCommand) {
-        let read_strat = self.strategy.node_strategies[self.id as usize - 1].read_strategy;
         let i_am_leading = match self.omnipaxos.get_current_leader() {
             Some(leader) => leader == self.id,
             None => false,
         };
+        let read_strat = self.strategy.read_strategies[self.id as usize - 1];
         match read_strat {
             ReadStrategy::ReadAsWrite => self.commit_command_to_log(from, command_id, kv_command).await,
             ReadStrategy::QuorumRead => self.start_quorum_read(from, command_id, kv_command).await,
@@ -394,11 +405,32 @@ impl OmniPaxosServer {
         }
     }
 
-    fn print_metrics(&self, new_leader: bool , new_quorum: bool, new_strat: bool) {
-        let leader = self.omnipaxos.get_current_leader();
+    async fn send_strat(&mut self) {
+        let msg = ClusterMessage::ReadStrategyUpdate(self.strategy.read_strategies.clone());
+        for peer in self.omnipaxos.get_peers() {
+            self.network.send(Outgoing::ClusterMessage(*peer, msg.clone())).await;
+        }
+    }
+
+    // TODO: its possible for strategy updates to come in out of sync or get dropped
+    fn handle_read_strategy_update(&mut self, _from: NodeId, read_strat: Vec<ReadStrategy>) {
+        self.strategy.read_strategies = read_strat
+    }
+ 
+    fn log(&self, strategy: Option<(&ClusterStrategy, f64)>, new_strat: bool) {
         let timestamp = Utc::now().timestamp_millis();
+        let leader = self.omnipaxos.get_current_leader();
+        let read_quorum = self.omnipaxos.get_read_config().read_quorum_size;
+        let node_strat = leader.map(|l| self.optimizer.get_optimal_node_strat(l, read_quorum, self.id));
+        let leader_json = serde_json::to_string(&leader).unwrap();
+        let operation_latency_json = serde_json::to_string(&node_strat).unwrap();
         let metrics_json = serde_json::to_string(&self.metrics_server.metrics).unwrap();
-        let strategy_json = serde_json::to_string(&self.strategy).unwrap();
-        println!("{{ \"timestamp\": {timestamp}, \"cluster_metrics\": {metrics_json:<500}, \"cluster_strategy\": {strategy_json:<500}, \"leader\": {leader:?}, \"new_leader\": {new_leader}, \"new_quorum\": {new_quorum}, \"new_strat\":{new_strat} }}");
+        let strategy_latency = strategy.map(|s| s.1);
+        let strategy_json = match strategy {
+            Some((strat, _)) => serde_json::to_string(strat).unwrap(),
+            None => serde_json::to_string(&None::<ClusterStrategy>).unwrap(),
+        };
+        let strategy_latency_json = serde_json::to_string(&strategy_latency).unwrap();
+        println!("{{ \"timestamp\": {timestamp}, \"new_strat\": {new_strat}, \"strat_latency\": {strategy_latency_json:<20}, \"cluster_strategy\": {strategy_json:<200}, \"operation_latency\": {operation_latency_json:<100}, \"leader\": {leader_json}, \"cluster_metrics\": {metrics_json} }}");
     }
 }

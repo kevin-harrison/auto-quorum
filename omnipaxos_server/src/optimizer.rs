@@ -1,4 +1,4 @@
-use common::kv::NodeId;
+use common::{kv::NodeId, messages::ReadStrategy};
 use serde::Serialize;
 
 use crate::metrics::{ClusterMetrics, Load};
@@ -8,21 +8,10 @@ const FAILURE_TOLERANCE: usize = 1;
 
 #[derive(Debug, Serialize, Clone)]
 pub struct ClusterStrategy {
-    pub average_latency_estimate: f64,
     pub leader: NodeId,
     pub read_quorum_size: usize,
-    pub node_strategies: Vec<NodeStrategy>,
-}
-
-impl ClusterStrategy {
-    pub fn new(leader: NodeId, read_quorum_size: usize) -> Self {
-        Self {
-            average_latency_estimate: 0.,
-            leader,
-            read_quorum_size,
-            node_strategies: vec![NodeStrategy::default()],
-        }
-    }
+    pub write_quorum_size: usize,
+    pub read_strategies: Vec<ReadStrategy>,
 }
 
 #[derive(Debug, Serialize, Clone, Copy, Default)]
@@ -32,76 +21,76 @@ pub struct NodeStrategy {
     pub read_strategy: ReadStrategy,
 }
 
-impl Eq for NodeStrategy {}
-
-impl PartialEq for NodeStrategy {
-    fn eq(&self, other: &Self) -> bool {
-        self.read_strategy == other.read_strategy
-    }
-}
-
-#[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ReadStrategy {
-    #[default]
-    ReadAsWrite,
-    QuorumRead,
-    LeaderRead,
-    ProxiedLeaderRead,
-}
-
 pub struct ClusterOptimizer {
-    optimal_strategy: ClusterStrategy,
     num_nodes: usize,
     cached_latencies: Vec<Vec<f64>>,
     // rows = leader, cols = read quorum_size, depth = node
     cached_strats: Vec<Vec<Vec<NodeStrategy>>>,
-    read_quorum_indices: Vec<usize>,
+    quorum_indices: Vec<(usize, usize)>,
     invalidate_cache_threshold: f64,
 }
 
 impl ClusterOptimizer {
-    pub fn new(nodes: Vec<NodeId>, initial_strategy: ClusterStrategy) -> ClusterOptimizer {
+    pub fn new(nodes: Vec<NodeId>) -> ClusterOptimizer {
         let num_nodes = nodes.len();
-        let read_quorum_indices: Vec<usize> =
-            (FAILURE_TOLERANCE + 1..=num_nodes - FAILURE_TOLERANCE).collect();
-        let num_quorum_options = read_quorum_indices.len();
+        let quorum_indices = Self::create_quorum_indices(num_nodes);
+        let num_quorum_options = quorum_indices.len();
         ClusterOptimizer {
-            optimal_strategy: initial_strategy,
             num_nodes,
             cached_latencies: vec![vec![0.; num_nodes]; num_nodes],
             cached_strats: vec![
                 vec![vec![NodeStrategy::default(); num_nodes]; num_quorum_options];
                 num_nodes
             ],
-            read_quorum_indices,
+            quorum_indices, 
             invalidate_cache_threshold: 5.,
         }
     }
 
-    pub fn update_optimal_strategy(&mut self, metrics: &ClusterMetrics) -> &ClusterStrategy {
-        self.validate_cache(&metrics.latencies);
-        let current_leader_idx = self.optimal_strategy.leader as usize - 1;
-        let current_read_quorum_idx = self.optimal_strategy.read_quorum_size - 1;
-        let mut best_latency = self.get_latency(
-            &metrics.workload,
-            current_leader_idx,
-            current_read_quorum_idx,
-        );
+    pub fn calculate_optimal_strategy(&mut self, metrics: &ClusterMetrics) -> (ClusterStrategy, f64) {
+        self.update_cache(&metrics.latencies);
+        let mut best_latency = f64::MAX;
+        let mut best_leader_idx = 0;
+        let mut best_quorum_idx = 0;
         for leader_idx in 0..self.num_nodes {
-            for (quorum_cache_idx, read_quorum_idx) in
-                self.read_quorum_indices.iter().enumerate()
-            {
-                let latency = self.get_latency(&metrics.workload, leader_idx, quorum_cache_idx);
+            for quorum_idx in 0..self.quorum_indices.len() {
+                let latency = self.get_latency(&metrics.workload, leader_idx, quorum_idx);
                 if latency < best_latency {
                     best_latency = latency;
-                    self.optimal_strategy.leader = leader_idx as NodeId + 1;
-                    self.optimal_strategy.read_quorum_size = read_quorum_idx + 1;
-                    self.optimal_strategy.average_latency_estimate =
-                        latency / metrics.get_total_load();
+                    best_leader_idx = leader_idx;
+                    best_quorum_idx = quorum_idx;
                 }
             }
         }
-        &self.optimal_strategy
+        let best_read_strats = self.cached_strats[best_leader_idx][best_quorum_idx].iter().map(|node_strat| node_strat.read_strategy).collect();
+        let best_strategy = ClusterStrategy {
+            leader: best_leader_idx as NodeId + 1,
+            read_quorum_size: self.quorum_indices[best_quorum_idx].0 + 1,
+            write_quorum_size: self.quorum_indices[best_quorum_idx].1 + 1,
+            read_strategies: best_read_strats,
+        };
+        (best_strategy, best_latency / metrics.get_total_load())
+    }
+
+    pub fn score_strategy(&self, metrics: &ClusterMetrics, strategy: &ClusterStrategy) -> f64 {
+        let leader_idx = strategy.leader as usize - 1;
+        let quorum_idx = self.read_quorum_size_to_idx(strategy.read_quorum_size);
+        let latency = self.get_latency(&metrics.workload, leader_idx, quorum_idx);
+        latency / metrics.get_total_load()
+    }
+
+    pub fn get_optimal_read_strat(&self, leader: NodeId, read_quorum_size: usize, node: NodeId) -> ReadStrategy {
+        let leader_idx = leader as usize - 1;
+        let quorum_idx = self.read_quorum_size_to_idx(read_quorum_size);
+        let node_idx = node as usize - 1;
+        self.cached_strats[leader_idx][quorum_idx][node_idx].read_strategy
+    }
+
+    pub fn get_optimal_node_strat(&self, leader: NodeId, read_quorum_size: usize, node: NodeId) -> NodeStrategy {
+        let leader_idx = leader as usize - 1;
+        let quorum_idx = self.read_quorum_size_to_idx(read_quorum_size);
+        let node_idx = node as usize - 1;
+        self.cached_strats[leader_idx][quorum_idx][node_idx]
     }
 
     fn get_latency(&self, workload: &Vec<Load>, leader_idx: usize, quorum_idx: usize) -> f64 {
@@ -115,16 +104,16 @@ impl ClusterOptimizer {
         total_latency
     }
 
-    fn validate_cache(&mut self, new_latencies: &Vec<Vec<f64>>) {
-        if !self.validate_cached_latencies(new_latencies) {
+    fn update_cache(&mut self, new_latencies: &Vec<Vec<f64>>) {
+        if self.validate_cached_latencies(new_latencies) {
             return;
         }
+        log::error!("updating latency cache");
         let quorum_latencies = self.calculate_quorum_latencies();
         for leader in 0..self.cached_strats.len() {
-            for (quorum_cache_idx, read_quorum_idx) in
-                self.read_quorum_indices.iter().cloned().enumerate()
-            {
-                let write_quorum_idx = self.calculate_write_quorum_idx(read_quorum_idx);
+            for quorum_idx in 0..self.quorum_indices.len() {
+                let read_quorum_idx = self.quorum_indices[quorum_idx].0;
+                let write_quorum_idx = self.quorum_indices[quorum_idx].1;
                 for node in 0..self.num_nodes {
                     // Read as write
                     let to_leader_rtt = self.cached_latencies[node][leader];
@@ -155,7 +144,7 @@ impl ClusterOptimizer {
                         + (to_leader_rtt / 2.);
                     let read_quorum_latency =
                         read_quorum_latency_no_wait.max(read_quorum_latency_with_wait);
-                    if read_quorum_latency < best_strategy_latency {
+                    if read_quorum_latency <= best_strategy_latency {
                         best_strategy = ReadStrategy::QuorumRead;
                         best_strategy_latency = read_quorum_latency;
                     }
@@ -176,7 +165,7 @@ impl ClusterOptimizer {
                     //     }
                     // }
 
-                    self.cached_strats[leader][quorum_cache_idx][node] = NodeStrategy {
+                    self.cached_strats[leader][quorum_idx][node] = NodeStrategy {
                         write_latency,
                         read_strategy: best_strategy,
                         read_latency: best_strategy_latency,
@@ -212,8 +201,13 @@ impl ClusterOptimizer {
         quorum_latencies
     }
 
-    fn calculate_write_quorum_idx(&self, read_quorum_idx: usize) -> usize {
-        self.num_nodes - read_quorum_idx - 1
+    fn create_quorum_indices(num_nodes: usize) -> Vec<(usize, usize)> {
+        let read_quorum_indices = FAILURE_TOLERANCE..num_nodes - FAILURE_TOLERANCE;
+        read_quorum_indices.map(|read_q_idx| (read_q_idx, num_nodes - read_q_idx - 1)).collect()
+    }
+
+    fn read_quorum_size_to_idx(&self, read_quorum_size: usize) -> usize {
+        read_quorum_size - self.quorum_indices[0].0 - 1
     }
 }
 

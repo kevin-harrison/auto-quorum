@@ -38,6 +38,7 @@ pub enum ClusterMessage {
     QuorumReadRequest(QuorumReadRequest),
     QuorumReadResponse(QuorumReadResponse),
     MetricSync(MetricSync),
+    ReadStrategyUpdate(Vec<ReadStrategy>)
 }
 
 // next
@@ -81,3 +82,11 @@ pub struct MetricUpdate {
     pub load: (f64, f64),
 } 
 
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ReadStrategy {
+    #[default]
+    ReadAsWrite,
+    QuorumRead,
+    LeaderRead,
+    ProxiedLeaderRead,
+}
