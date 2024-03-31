@@ -17,7 +17,7 @@ cleanup() {
 trap "interrupt" SIGINT
 trap "cleanup" EXIT
 
-sudo tc qdisc add dev lo root netem delay 100msec
+# sudo tc qdisc add dev lo root netem delay 100msec
 for ((i = 1; i <= cluster_size; i++)); do
     config_path="./server-${i}-config.toml"
     if [ -z "$2" ]; then
@@ -27,7 +27,7 @@ for ((i = 1; i <= cluster_size; i++)); do
         sed -i "s/OPTIMIZE/false/g" "$config_path" &&
         log_path="../../auto-quorum-benchmark/logs/test-local-no-reconfig_server-${i}.log"
     fi
-    RUST_LOG=debug CONFIG_FILE="$config_path" cargo run --manifest-path="../omnipaxos_server/Cargo.toml" 1> "$log_path" &
+    RUST_LOG=error CONFIG_FILE="$config_path" cargo run --release --manifest-path="../omnipaxos_server/Cargo.toml" 1> "$log_path" &
 done
 wait
 
