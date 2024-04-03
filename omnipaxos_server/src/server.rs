@@ -11,7 +11,7 @@ use omnipaxos::{
 use omnipaxos_storage::memory_storage::MemoryStorage;
 
 use crate::{
-    database::Database, metrics::MetricsHeartbeatServer, optimizer::{ClusterOptimizer, ClusterStrategy}, read::QuorumReader, router::Router
+    database::Database, metrics::MetricsHeartbeatServer, optimizer::{ClusterOptimizer, ClusterStrategy}, read::QuorumReader, router::{Router, RouterWithLatency}
 };
 use common::{kv::*, messages::*};
 
@@ -20,6 +20,7 @@ pub struct OmniPaxosServerConfig {
     pub location: String,
     pub initial_leader: Option<NodeId>,
     pub optimize: Option<bool>,
+    pub optimize_threshold: Option<f64>,
     pub congestion_control: Option<bool>,
     pub local_deployment: Option<bool>,
 }
@@ -38,6 +39,7 @@ pub struct OmniPaxosServer {
     optimizer: ClusterOptimizer,
     strategy: ClusterStrategy,
     optimize: bool,
+    optimize_threshold: f64,
 }
 
 impl OmniPaxosServer {
@@ -74,6 +76,7 @@ impl OmniPaxosServer {
             optimizer,
             strategy: init_strat,
             optimize,
+            optimize_threshold: server_config.optimize_threshold.unwrap_or(0.8),
         };
         server.send_outgoing_msgs().await;
         server
@@ -122,19 +125,21 @@ impl OmniPaxosServer {
 
     async fn handle_optimize_timeout(&mut self) {
         if !self.optimize {
-            self.log(None, false);
+            self.log(None, false, false);
             return;
         }
         if let Some(leader) = self.omnipaxos.get_current_leader() {
             self.strategy.leader = leader;
             self.strategy.read_quorum_size = self.omnipaxos.get_read_config().read_quorum_size;
             // Only leader has to do this, but for logs we do it anyways
-            let (optimal_strategy, optimal_strategy_latency) = 
+            let (optimal_strategy, optimal_strategy_latency, cache_update) = 
                 self.optimizer.calculate_optimal_strategy(&self.metrics_server.metrics);
             let current_strategy_latency = 
                 self.optimizer.score_strategy(&self.metrics_server.metrics, &self.strategy);
             if leader == self.id {
-                if optimal_strategy_latency / current_strategy_latency < 0.97 {
+                let absolute_latency_improvement = optimal_strategy_latency - current_strategy_latency;
+                let relative_latency_improvement = optimal_strategy_latency / current_strategy_latency;
+                if absolute_latency_improvement < -2. && relative_latency_improvement < self.optimize_threshold {
                     if optimal_strategy.leader != leader {
                         self.omnipaxos.relinquish_leadership(optimal_strategy.leader);
                         self.send_outgoing_msgs().await;
@@ -159,12 +164,12 @@ impl OmniPaxosServer {
                         self.strategy.read_strategies = optimal_strategy.read_strategies.clone();
                         self.send_strat().await;
                     }
-                    self.log(Some((&optimal_strategy, optimal_strategy_latency)), true);
+                    self.log(Some((&optimal_strategy, optimal_strategy_latency, current_strategy_latency)), true, cache_update);
                 } else {
-                    self.log(Some((&self.strategy, current_strategy_latency)), false);
+                    self.log(Some((&self.strategy, optimal_strategy_latency, current_strategy_latency)), false, cache_update);
                 }
             } else {
-                self.log(None, false)
+                self.log(None, false, cache_update)
             }
         }
             // let new_strategy = optimizer::find_better_strategy(&self.metrics_server.metrics, &mut self.strategy);
@@ -228,6 +233,7 @@ impl OmniPaxosServer {
                 .read_decided_suffix(self.current_decided_idx)
                 .unwrap();
             self.current_decided_idx = new_decided_idx;
+            log::debug!("Decided {new_decided_idx}");
             let decided_commands = decided_entries.into_iter().filter_map(|e| match e {
                 LogEntry::Decided(cmd) => Some(cmd),
                 // TODO: handle snapshotted entries
@@ -295,8 +301,8 @@ impl OmniPaxosServer {
             Incoming::ClusterMessage(from, ClusterMessage::QuorumReadRequest(req)) => {
                 self.handle_quorum_read_request(from, req).await;
             }
-            Incoming::ClusterMessage(_from, ClusterMessage::QuorumReadResponse(resp)) => {
-                self.handle_quorum_read_response(resp).await;
+            Incoming::ClusterMessage(from, ClusterMessage::QuorumReadResponse(resp)) => {
+                self.handle_quorum_read_response(from, resp).await;
             }
             Incoming::ClusterMessage(from, ClusterMessage::MetricSync(sync)) => {
                 if let Some((to, reply)) = self.metrics_server.handle_metric_sync(from, sync) {
@@ -373,8 +379,8 @@ impl OmniPaxosServer {
 
     // TODO: if reads show us that something is chosen but not decided we can decide it and
     // apply chosen writes and rinse reads immediately.
-    async fn handle_quorum_read_response(&mut self, response: QuorumReadResponse) {
-        debug!("Got q response: {response:#?}");
+    async fn handle_quorum_read_response(&mut self, from: NodeId, response: QuorumReadResponse) {
+        debug!("Got q response from {from}: {response:#?}");
         if let Some(ready_read) = self
             .quorum_reader
             .handle_response(response, self.current_decided_idx)
@@ -417,7 +423,7 @@ impl OmniPaxosServer {
         self.strategy.read_strategies = read_strat
     }
  
-    fn log(&self, strategy: Option<(&ClusterStrategy, f64)>, new_strat: bool) {
+    fn log(&self, strategy: Option<(&ClusterStrategy, f64, f64)>, new_strat: bool, cache_update: bool) {
         let timestamp = Utc::now().timestamp_millis();
         let leader = self.omnipaxos.get_current_leader();
         let read_quorum = self.omnipaxos.get_read_config().read_quorum_size;
@@ -425,12 +431,14 @@ impl OmniPaxosServer {
         let leader_json = serde_json::to_string(&leader).unwrap();
         let operation_latency_json = serde_json::to_string(&node_strat).unwrap();
         let metrics_json = serde_json::to_string(&self.metrics_server.metrics).unwrap();
-        let strategy_latency = strategy.map(|s| s.1);
+        let opt_strategy_latency = strategy.map(|s| s.1 / self.metrics_server.metrics.get_total_load());
+        let curr_strategy_latency = strategy.map(|s| s.2 / self.metrics_server.metrics.get_total_load());
         let strategy_json = match strategy {
-            Some((strat, _)) => serde_json::to_string(strat).unwrap(),
+            Some((strat, _, _)) => serde_json::to_string(strat).unwrap(),
             None => serde_json::to_string(&None::<ClusterStrategy>).unwrap(),
         };
-        let strategy_latency_json = serde_json::to_string(&strategy_latency).unwrap();
-        println!("{{ \"timestamp\": {timestamp}, \"new_strat\": {new_strat}, \"strat_latency\": {strategy_latency_json:<20}, \"cluster_strategy\": {strategy_json:<200}, \"operation_latency\": {operation_latency_json:<100}, \"leader\": {leader_json}, \"cluster_metrics\": {metrics_json} }}");
+        let opt_strategy_latency_json = serde_json::to_string(&opt_strategy_latency).unwrap();
+        let curr_strategy_latency_json = serde_json::to_string(&curr_strategy_latency).unwrap();
+        println!("{{ \"timestamp\": {timestamp}, \"new_strat\": {new_strat}, \"opt_strat_latency\": {opt_strategy_latency_json:<20}, \"curr_strat_latency\": {curr_strategy_latency_json:<20}, \"cluster_strategy\": {strategy_json:<200}, \"operation_latency\": {operation_latency_json:<100}, \"leader\": {leader_json}, \"metrics_update\": {cache_update}, \"cluster_metrics\": {metrics_json} }}");
     }
 }

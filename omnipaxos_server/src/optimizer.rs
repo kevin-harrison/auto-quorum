@@ -47,8 +47,8 @@ impl ClusterOptimizer {
         }
     }
 
-    pub fn calculate_optimal_strategy(&mut self, metrics: &ClusterMetrics) -> (ClusterStrategy, f64) {
-        self.update_cache(&metrics.latencies);
+    pub fn calculate_optimal_strategy(&mut self, metrics: &ClusterMetrics) -> (ClusterStrategy, f64, bool) {
+        let cache_update = self.update_cache(&metrics.latencies);
         let mut best_latency = f64::MAX;
         let mut best_leader_idx = 0;
         let mut best_quorum_idx = 0;
@@ -69,14 +69,14 @@ impl ClusterOptimizer {
             write_quorum_size: self.quorum_indices[best_quorum_idx].1 + 1,
             read_strategies: best_read_strats,
         };
-        (best_strategy, best_latency / metrics.get_total_load())
+        (best_strategy, best_latency, cache_update)
     }
 
     pub fn score_strategy(&self, metrics: &ClusterMetrics, strategy: &ClusterStrategy) -> f64 {
         let leader_idx = strategy.leader as usize - 1;
         let quorum_idx = self.read_quorum_size_to_idx(strategy.read_quorum_size);
         let latency = self.get_latency(&metrics.workload, leader_idx, quorum_idx);
-        latency / metrics.get_total_load()
+        latency
     }
 
     pub fn get_optimal_read_strat(&self, leader: NodeId, read_quorum_size: usize, node: NodeId) -> ReadStrategy {
@@ -104,17 +104,18 @@ impl ClusterOptimizer {
         total_latency
     }
 
-    fn update_cache(&mut self, new_latencies: &Vec<Vec<f64>>) {
+    fn update_cache(&mut self, new_latencies: &Vec<Vec<f64>>) -> bool {
         if self.validate_cached_latencies(new_latencies) {
-            return;
+            return false;
         }
-        log::error!("updating latency cache");
+        log::debug!("UPDATING STRATS:");
         let quorum_latencies = self.calculate_quorum_latencies();
         for leader in 0..self.cached_strats.len() {
             for quorum_idx in 0..self.quorum_indices.len() {
                 let read_quorum_idx = self.quorum_indices[quorum_idx].0;
                 let write_quorum_idx = self.quorum_indices[quorum_idx].1;
                 for node in 0..self.num_nodes {
+                    log::debug!("======= LEADER {leader}, QUORUM {read_quorum_idx}, NODE {node} =======");
                     // Read as write
                     let to_leader_rtt = self.cached_latencies[node][leader];
                     let leader_write_latency = quorum_latencies[leader][write_quorum_idx].1;
@@ -123,7 +124,7 @@ impl ClusterOptimizer {
                     let mut best_strategy_latency = write_latency;
 
                     // Quorum read
-                    let read_quorum = &quorum_latencies[node][0..read_quorum_idx];
+                    let read_quorum = &quorum_latencies[node][0..=read_quorum_idx];
                     let (node_to_most_updated_latency, leader_to_most_updated_latency) = quorum_latencies[leader]
                         .iter()
                         .find_map(|(id, leader_to_most_updated_latency)| {
@@ -149,6 +150,13 @@ impl ClusterOptimizer {
                         best_strategy_latency = read_quorum_latency;
                     }
 
+                    log::debug!("to_leader_rtt={to_leader_rtt}");
+                    log::debug!("leader_write_latency={leader_write_latency}");
+                    log::debug!("read_quorum={read_quorum:?}");
+                    log::debug!("bottleneck={read_quorum_latency_no_wait}");
+                    log::debug!("node=>most_updated={node_to_most_updated_latency}");
+                    log::debug!("leader=>most_updated={leader_to_most_updated_latency}");
+
                     // TODO: Leader reads
                     // // Leader read
                     // let leader_read_latency = quorum_latencies[leader][read_quorum_idx].1;
@@ -173,6 +181,7 @@ impl ClusterOptimizer {
                 }
             }
         }
+        return true;
     }
 
     fn validate_cached_latencies(&mut self, new_latencies: &Vec<Vec<f64>>) -> bool {

@@ -220,3 +220,68 @@ impl Stream for Router {
         return Poll::Pending;
     }
 }
+
+pub struct RouterWithLatency {
+    router: Router,
+    latencies: Vec<Vec<u64>>,
+    buffer: VecDeque<Incoming>,
+    timers: VecDeque<tokio::time::Instant>,
+}
+
+impl RouterWithLatency {
+    pub async fn new(
+        id: NodeId,
+        nodes: Vec<NodeId>,
+        is_local: bool,
+        congestion_control: bool,
+        // latencies: Vec<Vec<u64>>,
+    ) -> Result<Self, Error> {
+        let mut latencies = vec![];
+        latencies.push(vec![0, 10, 20]);
+        latencies.push(vec![10, 0, 20]);
+        latencies.push(vec![0, 20,  0]);
+        Ok(Self {
+            router: Router::new(id, nodes, is_local, congestion_control).await?,
+            buffer: VecDeque::new(),
+            timers: VecDeque::new(),
+            latencies,
+        })
+    }
+    
+    pub async fn send(&mut self, message: Outgoing) {
+        self.router.send(message).await;
+    }
+}
+
+impl Stream for RouterWithLatency {
+    type Item = Incoming;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        match Pin::new(&mut this.router).poll_next(cx) {
+            Poll::Ready(Some(Ok(item))) => {
+                match item {
+                    Incoming::ClusterMessage(from, msg) => {
+                        let now = tokio::time::Instant::now();
+                        let delay = tokio::time::Duration::from_millis(this.latencies[this.router.id as usize - 1][from as usize - 1]);
+                        this.buffer.push_back(Incoming::ClusterMessage(from, msg));
+                        this.timers.push_back(now + delay);
+                    },
+                    client_msg => return Poll::Ready(Some(client_msg)) 
+                }
+            }
+            _other => (),
+        };
+
+        match this.timers.front() {
+            Some(l) if tokio::time::Instant::now() >= *l => {
+                this.timers.pop_front();
+                Poll::Ready(this.buffer.pop_front())
+            },
+            _ => {
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+        }
+    }
+}

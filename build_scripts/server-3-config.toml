@@ -2,6 +2,7 @@ location = "local-3"
 initial_leader = 1
 local_deployment = true
 optimize = OPTIMIZE
+optimize_threshold = 0.97
 
 [cluster_config]
 configuration_id = 1
