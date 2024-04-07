@@ -1,4 +1,4 @@
-use omnipaxos::{messages::Message as OmniPaxosMessage, storage::ReadQuorumConfig, util::NodeId};
+use omnipaxos::{ballot_leader_election::Ballot, messages::Message as OmniPaxosMessage, storage::ReadQuorumConfig, util::NodeId};
 use serde::{Deserialize, Serialize};
 
 use crate::kv::{ClientId, Command, CommandId, KVCommand};
@@ -68,6 +68,56 @@ pub struct QuorumReadResponse {
     pub command_id: CommandId,
     pub read_quorum_config: ReadQuorumConfig,
     pub accepted_idx: usize,
+    pub ballot_read: BallotRead
+}
+
+impl QuorumReadResponse {
+    pub fn new(
+        my_id: NodeId,
+        client_id: ClientId,
+        command_id: CommandId,
+        read_quorum_config: ReadQuorumConfig,
+        accepted_idx: usize,    
+        promise: Ballot,
+        leader: NodeId,
+        decided_idx: usize,
+        max_prom_acc_idx: Option<usize>,
+    ) -> Self {
+        let ballot_read = BallotRead::new(my_id, promise, leader, decided_idx, max_prom_acc_idx);
+        QuorumReadResponse {
+            client_id,
+            command_id,
+            read_quorum_config,
+            accepted_idx,
+            ballot_read
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum BallotRead {
+    Follows((Ballot, NodeId)),
+    Leader((Ballot, NodeId), Option<usize>),
+}
+
+impl BallotRead {
+    pub fn new(
+        my_id: NodeId,
+        promise: Ballot,
+        leader: NodeId,
+        decided_idx: usize,
+        max_prom_acc_idx: Option<usize>,
+    ) -> Self {
+        if my_id == leader {
+            let rinse_idx = match max_prom_acc_idx {
+                Some(idx)=> Some(decided_idx.max(idx)),
+                _ => None,
+            };
+            BallotRead::Leader((promise, leader), rinse_idx)
+        } else {
+            BallotRead::Follows((promise, leader))
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -87,6 +137,5 @@ pub enum ReadStrategy {
     #[default]
     ReadAsWrite,
     QuorumRead,
-    LeaderRead,
-    ProxiedLeaderRead,
+    BallotRead,
 }
