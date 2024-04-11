@@ -194,7 +194,7 @@ impl Stream for Router {
                             self_mut.buffer.push_back(request);
                         },
                         NetworkMessage::KillServer => {
-                            panic!("Received kill signal.");
+                            panic!("Received kill signal.")
                         }
                         m => warn!("Received unexpected message: {m:?}"),
                     }

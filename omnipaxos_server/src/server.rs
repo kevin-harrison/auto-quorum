@@ -11,7 +11,7 @@ use omnipaxos::{
 use omnipaxos_storage::memory_storage::MemoryStorage;
 
 use crate::{
-    database::Database, metrics::MetricsHeartbeatServer, optimizer::{ClusterOptimizer, ClusterStrategy}, read::QuorumReader, router::Router
+    database::Database, metrics::MetricsHeartbeatServer, optimizer::{ClusterOptimizer, ClusterStrategy}, read::QuorumReader, network::Network
 };
 use common::{kv::*, messages::*};
 
@@ -32,7 +32,7 @@ pub struct OmniPaxosServer {
     id: NodeId,
     nodes: Vec<NodeId>,
     database: Database,
-    network: Router,
+    network: Network,
     omnipaxos: OmniPaxosInstance,
     current_decided_idx: usize,
     quorum_reader: QuorumReader,
@@ -51,11 +51,10 @@ impl OmniPaxosServer {
         let server_id = omnipaxos_config.server_config.pid;
         let nodes = omnipaxos_config.cluster_config.nodes.clone();
         let local_deployment = server_config.local_deployment.unwrap_or(false);
-        let congestion_control = server_config.congestion_control.unwrap_or(false);
         let optimize = server_config.optimize.unwrap_or(true);
         let storage: MemoryStorage<Command> = MemoryStorage::default();
         let omnipaxos = omnipaxos_config.build(storage).unwrap();
-        let router = Router::new(server_id, nodes.clone(), local_deployment, congestion_control).await.unwrap();
+        let network = Network::new(server_id, nodes.clone(), local_deployment).await.unwrap();
         let metrics_server = MetricsHeartbeatServer::new(server_id, nodes.clone());
         let init_read_quorum = omnipaxos.get_read_config().read_quorum_size;
         let init_read_strat = server_config.initial_read_strat.unwrap_or_default();
@@ -70,7 +69,7 @@ impl OmniPaxosServer {
             id: server_id,
             nodes,
             database: Database::new(),
-            network: router,
+            network,
             omnipaxos,
             current_decided_idx: 0,
             quorum_reader: QuorumReader::new(server_id),

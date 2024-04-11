@@ -8,7 +8,7 @@ use tokio::time::interval;
 use tokio::net::TcpStream;
 use tokio_stream::StreamExt;
 
-use common::util::{get_node_addr, wrap_stream, Connection as ServerConnection};
+use common::util::{get_node_addr, wrap_stream_2, Connection as ServerConnection};
 use common::{kv::*, messages::*};
 
 #[derive(Debug, Serialize)]
@@ -71,7 +71,7 @@ impl Client {
             .expect("Couldn't connect to server {server_id}");
         server_stream.set_nodelay(true).unwrap();
         let mut client = Self {
-            server: wrap_stream(server_stream),
+            server: wrap_stream_2(server_stream),
             command_id: 0,
             request_data: Vec::with_capacity(8000),
             read_ratio: config.read_ratio,

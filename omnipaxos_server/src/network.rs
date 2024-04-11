@@ -9,42 +9,15 @@ use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
-use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::{Receiver, Sender};
-use tokio_serde::{formats::Cbor, Framed};
-use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
 
-use common::{kv::ClientId, messages::*};
+use common::{kv::ClientId, messages::*, util::*};
 
 enum ConnectionId {
     ClientConnection(ClientId),
     ServerConnection(NodeId),
-}
-
-type NetworkSource = Framed<
-    FramedRead<OwnedReadHalf, LengthDelimitedCodec>,
-    NetworkMessage,
-    (),
-    Cbor<NetworkMessage, ()>,
->;
-type NetworkSink = Framed<
-    FramedWrite<OwnedWriteHalf, LengthDelimitedCodec>,
-    (),
-    NetworkMessage,
-    Cbor<(), NetworkMessage>,
->;
-
-/// Turns tcp stream into a framed read and write sink/source
-fn wrap_stream(stream: TcpStream) -> (NetworkSource, NetworkSink) {
-    let (reader, writer) = stream.into_split();
-    let stream = FramedRead::new(reader, LengthDelimitedCodec::new());
-    let sink = FramedWrite::new(writer, LengthDelimitedCodec::new());
-    (
-        NetworkSource::new(stream, Cbor::default()),
-        NetworkSink::new(sink, Cbor::default()),
-    )
 }
 
 enum NewConnection {
@@ -62,20 +35,19 @@ pub struct Network {
     connection_source: Receiver<NewConnection>,
     message_sink: Sender<Incoming>,
     message_source: Receiver<Incoming>,
+    is_local: bool,
 }
 
 impl Network {
-    fn get_node_addr(node: NodeId) -> SocketAddr {
-        let port = 8000 + node as u16;
-        SocketAddr::from(([127, 0, 0, 1], port))
-    }
-
-    pub async fn new(id: NodeId, peers: Vec<NodeId>) -> Result<Self, Error> {
+    pub async fn new(id: NodeId, peers: Vec<NodeId>, local_deployment: bool) -> Result<Self, Error> {
         let (connection_sink, connection_source) = mpsc::channel(100);
         let (message_sink, message_source) = mpsc::channel(100);
+        let port = 8000 + id as u16;
+        let listening_address = SocketAddr::from(([0, 0, 0, 0], port));
+        let listener = TcpListener::bind(listening_address).await?;
         let mut network = Self {
             id,
-            listener: TcpListener::bind(Self::get_node_addr(id)).await?,
+            listener,
             cluster_connections: HashMap::new(),
             client_connections: HashMap::new(),
             max_client_id: Arc::new(Mutex::new(0)),
@@ -83,6 +55,7 @@ impl Network {
             connection_source,
             message_sink,
             message_source,
+            is_local: local_deployment,
         };
         // Create connections to other servers
         for peer in peers.into_iter().filter(|p| *p < id) {
@@ -96,8 +69,9 @@ impl Network {
         let message_sink = self.message_sink.clone();
         let connection_sink = self.connection_sink.clone();
         let from = self.id;
+        let to_address = get_node_addr(to, self.is_local).expect("Error resolving dns name of node");
         tokio::spawn(async move {
-            match TcpStream::connect(Self::get_node_addr(to)).await {
+            match TcpStream::connect(to_address).await {
                 Ok(connection) => {
                     debug!("New connection to node {to}");
                     Self::handle_connection_to_node(
@@ -120,6 +94,7 @@ impl Network {
         connection_sink: Sender<NewConnection>,
         max_client_id_handle: Arc<Mutex<ClientId>>,
     ) {
+        connection.set_nodelay(true).unwrap();
         let (mut reader, writer) = wrap_stream(connection);
 
         // Identify connector's ID by handshake
@@ -206,6 +181,7 @@ impl Network {
         my_id: NodeId,
         to: NodeId,
     ) {
+        connection.set_nodelay(true).unwrap();
         let (mut reader, mut writer) = wrap_stream(connection);
 
         // Send handshake

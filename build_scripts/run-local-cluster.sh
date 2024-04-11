@@ -12,12 +12,12 @@ cleanup() {
         sed -i "s/optimize = true/optimize = OPTIMIZE/g" "$config_path"
         sed -i "s/optimize = false/optimize = OPTIMIZE/g" "$config_path"
     done
-    sudo tc qdisc del dev lo root
+    # sudo tc qdisc del dev lo root
 }
 trap "interrupt" SIGINT
 trap "cleanup" EXIT
 
-sudo tc qdisc add dev lo root netem delay 100msec
+# sudo tc qdisc add dev lo root netem delay 100msec
 for ((i = 1; i <= cluster_size; i++)); do
     config_path="./server-${i}-config.toml"
     if [ -z "$2" ]; then
