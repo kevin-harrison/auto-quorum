@@ -23,6 +23,7 @@ pub struct OmniPaxosServerConfig {
     pub optimize_threshold: Option<f64>,
     pub congestion_control: Option<bool>,
     pub local_deployment: Option<bool>,
+    pub initial_read_strat: Option<ReadStrategy>,
 }
 
 type OmniPaxosInstance = OmniPaxos<Command, MemoryStorage<Command>>;
@@ -57,11 +58,12 @@ impl OmniPaxosServer {
         let router = Router::new(server_id, nodes.clone(), local_deployment, congestion_control).await.unwrap();
         let metrics_server = MetricsHeartbeatServer::new(server_id, nodes.clone());
         let init_read_quorum = omnipaxos.get_read_config().read_quorum_size;
+        let init_read_strat = server_config.initial_read_strat.unwrap_or_default();
         let init_strat = ClusterStrategy {
             leader: server_id,
             read_quorum_size: init_read_quorum,
             write_quorum_size: nodes.len() - init_read_quorum + 1,
-            read_strategies: vec![ReadStrategy::default(); nodes.len()],
+            read_strategies: vec![init_read_strat; nodes.len()],
         };
         let optimizer = ClusterOptimizer::new(nodes.clone());
         let mut server = OmniPaxosServer {
@@ -85,7 +87,7 @@ impl OmniPaxosServer {
     pub async fn run(&mut self, initial_leader: Option<NodeId>) {
         let mut election_interval = tokio::time::interval(Duration::from_millis(1000));
         let mut optimize_interval = tokio::time::interval(Duration::from_millis(1000));
-        let mut init_leader_interval = tokio::time::interval(Duration::from_secs(5));
+        let mut init_leader_interval = tokio::time::interval(Duration::from_secs(10));
         let mut initialized_leader = match initial_leader {
             Some(_) => false,
             None => true,
@@ -287,8 +289,8 @@ impl OmniPaxosServer {
         let read_strat = self.strategy.read_strategies[self.id as usize - 1];
         match read_strat {
             ReadStrategy::ReadAsWrite => self.commit_command_to_log(from, command_id, kv_command).await,
-            ReadStrategy::QuorumRead => self.start_quorum_read(from, command_id, kv_command).await,
-            ReadStrategy::BallotRead => self.start_quorum_read(from, command_id, kv_command).await,
+            ReadStrategy::QuorumRead => self.start_quorum_read(from, command_id, kv_command, false).await,
+            ReadStrategy::BallotRead => self.start_quorum_read(from, command_id, kv_command, true).await,
         }
     }
 
@@ -334,7 +336,7 @@ impl OmniPaxosServer {
         }
     }
 
-    async fn start_quorum_read(&mut self, client_id: ClientId, command_id: CommandId, read_command: KVCommand) {
+    async fn start_quorum_read(&mut self, client_id: ClientId, command_id: CommandId, read_command: KVCommand, enable_ballot_read: bool) {
         debug!("Starting q read: {read_command:?}");
         self.quorum_reader.new_read(
             client_id,
@@ -346,6 +348,7 @@ impl OmniPaxosServer {
             self.omnipaxos.get_current_leader().unwrap_or(0),
             self.omnipaxos.get_decided_idx(),
             self.omnipaxos.get_max_prom_acc_idx(),
+            enable_ballot_read,
         );
         // TODO: thrifty messaging
         for peer in self.omnipaxos.get_peers() {

@@ -10,6 +10,7 @@ pub enum NetworkMessage {
     ClusterMessage(ClusterMessage),
     ClientMessage(ClientMessage),
     ServerMessage(ServerMessage),
+    KillServer,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -18,6 +18,7 @@ struct PendingRead {
     max_accepted_idx: usize,
     ballot_reads: Vec<BallotReadState>,
     ballot_rinse_discovered: bool,
+    ballot_reads_enabled: bool,
 }
 
 impl PendingRead {
@@ -25,7 +26,8 @@ impl PendingRead {
         read_command: KVCommand,
         read_quorum_config: ReadQuorumConfig,
         accepted_idx: usize,
-        ballot_read: BallotRead
+        ballot_read: BallotRead,
+        ballot_reads_enabled: bool,
     ) -> PendingRead {
         PendingRead {
             read_command,
@@ -35,6 +37,7 @@ impl PendingRead {
             ballot_reads: vec![BallotReadState::new(ballot_read)],
             rinse_idx: None,
             ballot_rinse_discovered: false,
+            ballot_reads_enabled,
         }
     }
 
@@ -54,7 +57,7 @@ impl PendingRead {
             }
         }
 
-        if self.ballot_rinse_discovered {
+        if self.ballot_rinse_discovered || !self.ballot_reads_enabled {
             return;
         }
         let leader_key = match response.ballot_read {
@@ -133,10 +136,11 @@ impl QuorumReader {
         leader: NodeId,
         decided_idx: usize,
         max_prom_acc_idx: Option<usize>,
+        ballot_read_enabled: bool,
     ) {
         let ballot_read = BallotRead::new(self.id, promise, leader, decided_idx, max_prom_acc_idx);
         let cmd_key = (client_id, command_id);
-        let pending_read = PendingRead::new(read_command, read_quorum_config, accepted_idx, ballot_read);
+        let pending_read = PendingRead::new(read_command, read_quorum_config, accepted_idx, ballot_read, ballot_read_enabled);
         self.pending_reads.insert(cmd_key, pending_read);
     }
 

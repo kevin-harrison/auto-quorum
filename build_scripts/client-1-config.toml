@@ -2,6 +2,7 @@ location = "local-1"
 server_id = 1
 read_ratio = 0.25
 local_deployment = true
+kill_signal_sec = 5
 scheduled_start_utc_ms = SCHEDULE
 
 [[request_rate_intervals]]

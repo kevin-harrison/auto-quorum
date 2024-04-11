@@ -30,6 +30,7 @@ pub struct ClientConfig {
     read_ratio: f64,
     request_rate_intervals: Vec<RequestInterval>,
     local_deployment: Option<bool>,
+    kill_signal_sec: Option<u64>,
     pub scheduled_start_utc_ms: Option<i64>,
 }
 
@@ -57,6 +58,7 @@ pub struct Client {
     request_data: Vec<RequestData>,
     read_ratio: f64,
     request_rate_intervals: Vec<RequestInterval>,
+    kill_signal_sec: Option<u64>,
 }
 
 impl Client {
@@ -74,6 +76,7 @@ impl Client {
             request_data: Vec::with_capacity(8000),
             read_ratio: config.read_ratio,
             request_rate_intervals: config.request_rate_intervals,
+            kill_signal_sec: config.kill_signal_sec,
         };
         client.send_registration().await;
         client
@@ -101,7 +104,12 @@ impl Client {
         let first_interval = intervals.next().unwrap();
         let mut request_interval = interval(first_interval.get_request_delay());
         let mut next_interval = interval(first_interval.get_interval_duration());
+        let mut kill_interval = match self.kill_signal_sec {
+            Some(sec_until_kill) => interval(Duration::from_secs(sec_until_kill)),
+            None => interval(Duration::from_secs(999999)),
+        };
         next_interval.tick().await;
+        kill_interval.tick().await;
 
         loop {
             tokio::select! {
@@ -123,6 +131,10 @@ impl Client {
                     } else {
                         break;
                     }
+                },
+                _ = kill_interval.tick(), if self.kill_signal_sec.is_some() => {
+                    self.send_kill_signal().await;
+                    break;
                 }
             }
         }
@@ -159,6 +171,13 @@ impl Client {
             .send(NetworkMessage::ClientRegister)
             .await
             .expect("Couldn't send message to server");
+    }
+
+    async fn send_kill_signal(&mut self) {
+        self.server
+            .send(NetworkMessage::KillServer)
+            .await
+            .expect("Couldn't send message to server")
     }
 
     fn print_results(&self) {

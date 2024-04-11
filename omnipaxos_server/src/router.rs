@@ -3,6 +3,7 @@ use anyhow::Error;
 use futures::{SinkExt, Stream};
 use omnipaxos::messages::ballot_leader_election::BLEMsg;
 use omnipaxos::messages::Message as OmniPaxosMessage;
+use core::panic;
 use std::task::{Context, Poll};
 use std::{
     collections::{HashMap, VecDeque},
@@ -181,7 +182,7 @@ impl Stream for Router {
                             debug!("Received request from client {id}: {m:?}");
                             let request = Incoming::ClientMessage(id, m);
                             self_mut.buffer.push_back(request);
-                        }
+                        },
                         NetworkMessage::ClusterMessage(m) => {
                             if let ClusterMessage::OmniPaxosMessage(
                                 OmniPaxosMessage::SequencePaxos(s),
@@ -191,6 +192,9 @@ impl Stream for Router {
                             }
                             let request = Incoming::ClusterMessage(id, m);
                             self_mut.buffer.push_back(request);
+                        },
+                        NetworkMessage::KillServer => {
+                            panic!("Received kill signal.");
                         }
                         m => warn!("Received unexpected message: {m:?}"),
                     }
