@@ -8,7 +8,7 @@ use tokio::time::interval;
 use tokio::net::TcpStream;
 use tokio_stream::StreamExt;
 
-use common::util::{get_node_addr, wrap_stream_2, Connection as ServerConnection};
+use common::util::{get_node_addr, wrap_stream, Connection as ServerConnection};
 use common::{kv::*, messages::*};
 
 #[derive(Debug, Serialize)]
@@ -71,7 +71,7 @@ impl Client {
             .expect("Couldn't connect to server {server_id}");
         server_stream.set_nodelay(true).unwrap();
         let mut client = Self {
-            server: wrap_stream_2(server_stream),
+            server: wrap_stream(server_stream),
             command_id: 0,
             request_data: Vec::with_capacity(8000),
             read_ratio: config.read_ratio,
@@ -132,9 +132,17 @@ impl Client {
                         break;
                     }
                 },
+                // Hardcoded for a specific benchmark
                 _ = kill_interval.tick(), if self.kill_signal_sec.is_some() => {
                     self.send_kill_signal().await;
-                    break;
+                    let server_address =
+                        get_node_addr(6, false).expect("Couldn't resolve server IP");
+                    let server_stream = TcpStream::connect(server_address)
+                        .await
+                        .expect("Couldn't connect to server {server_id}");
+                    server_stream.set_nodelay(true).unwrap();
+                    self.server = wrap_stream(server_stream);
+                    self.send_registration().await;
                 }
             }
         }
@@ -149,10 +157,9 @@ impl Client {
         };
         self.request_data.push(data);
         self.command_id += 1;
-        self.server
-            .send(NetworkMessage::ClientMessage(request))
-            .await
-            .expect("Couldn't send message to server");
+        if let Err(e) = self.server.send(NetworkMessage::ClientMessage(request)).await {
+            log::error!("Couldn't send command to server: {e}");
+        }
     }
 
     fn handle_response(&mut self, msg: NetworkMessage) {

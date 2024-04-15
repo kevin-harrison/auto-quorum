@@ -69,7 +69,13 @@ impl Network {
         let message_sink = self.message_sink.clone();
         let connection_sink = self.connection_sink.clone();
         let from = self.id;
-        let to_address = get_node_addr(to, self.is_local).expect("Error resolving dns name of node");
+        let to_address = match get_node_addr(to, self.is_local) {
+            Ok(addr) => addr,
+            Err(e) => {
+                log::error!("Error resolving DNS name of node {to}: {e}");
+                return;
+            },
+        };
         tokio::spawn(async move {
             match TcpStream::connect(to_address).await {
                 Ok(connection) => {
@@ -95,7 +101,7 @@ impl Network {
         max_client_id_handle: Arc<Mutex<ClientId>>,
     ) {
         connection.set_nodelay(true).unwrap();
-        let (mut reader, writer) = wrap_stream(connection);
+        let (mut reader, writer) = wrap_split_stream(connection);
 
         // Identify connector's ID by handshake
         let first_message = reader.next().await;
@@ -147,6 +153,10 @@ impl Network {
                             let request = Incoming::ClientMessage(id, m);
                             message_sink.send(request).await.unwrap();
                         }
+                        Ok(NetworkMessage::KillServer) => {
+                            log::error!("Received kill signal");
+                            std::process::abort();
+                        }
                         Ok(m) => warn!("Received unexpected message: {m:?}"),
                         Err(err) => {
                             error!("Error deserializing message: {:?}", err);
@@ -182,7 +192,7 @@ impl Network {
         to: NodeId,
     ) {
         connection.set_nodelay(true).unwrap();
-        let (mut reader, mut writer) = wrap_stream(connection);
+        let (mut reader, mut writer) = wrap_split_stream(connection);
 
         // Send handshake
         let handshake = NetworkMessage::NodeRegister(my_id);

@@ -1,8 +1,8 @@
 use chrono::Utc;
 use futures::StreamExt;
 use log::*;
+use serde::{Deserialize, Serialize};
 use std::time::Duration;
-use serde::{Serialize, Deserialize};
 
 use omnipaxos::{
     util::{FlexibleQuorum, LogEntry, NodeId},
@@ -11,7 +11,11 @@ use omnipaxos::{
 use omnipaxos_storage::memory_storage::MemoryStorage;
 
 use crate::{
-    database::Database, metrics::MetricsHeartbeatServer, optimizer::{ClusterOptimizer, ClusterStrategy}, read::QuorumReader, network::Network
+    database::Database,
+    metrics::MetricsHeartbeatServer,
+    network::Network,
+    optimizer::{ClusterOptimizer, ClusterStrategy},
+    read::QuorumReader,
 };
 use common::{kv::*, messages::*};
 
@@ -54,7 +58,9 @@ impl OmniPaxosServer {
         let optimize = server_config.optimize.unwrap_or(true);
         let storage: MemoryStorage<Command> = MemoryStorage::default();
         let omnipaxos = omnipaxos_config.build(storage).unwrap();
-        let network = Network::new(server_id, nodes.clone(), local_deployment).await.unwrap();
+        let network = Network::new(server_id, nodes.clone(), local_deployment)
+            .await
+            .unwrap();
         let metrics_server = MetricsHeartbeatServer::new(server_id, nodes.clone());
         let init_read_quorum = omnipaxos.get_read_config().read_quorum_size;
         let init_read_strat = server_config.initial_read_strat.unwrap_or_default();
@@ -73,7 +79,7 @@ impl OmniPaxosServer {
             omnipaxos,
             current_decided_idx: 0,
             quorum_reader: QuorumReader::new(server_id),
-            metrics_server, 
+            metrics_server,
             optimizer,
             strategy: init_strat,
             optimize,
@@ -134,18 +140,43 @@ impl OmniPaxosServer {
         if let Some(leader) = self.omnipaxos.get_current_leader() {
             self.strategy.leader = leader;
             // Only leader needs to optimize but kept for logging purposes
-            let cache_update = self.optimizer.update_latencies(&self.metrics_server.metrics.latencies);
+            let cache_update = self
+                .optimizer
+                .update_latencies(&self.metrics_server.metrics.latencies);
             let current_workload = &self.metrics_server.metrics.workload;
-            let current_strategy_latency = self.optimizer.score_strategy(current_workload, &self.strategy);
-            let (optimal_strategy, optimal_strategy_latency) = self.optimizer.calculate_optimal_strategy(current_workload);
+            let current_strategy_latency = self
+                .optimizer
+                .score_strategy(current_workload, &self.strategy);
+            let (optimal_strategy, optimal_strategy_latency) =
+                self.optimizer.calculate_optimal_strategy(current_workload);
             if leader == self.id {
-                let absolute_latency_improvement = optimal_strategy_latency - current_strategy_latency;
-                let relative_latency_improvement = optimal_strategy_latency / current_strategy_latency;
-                if absolute_latency_improvement < -2. && relative_latency_improvement < self.optimize_threshold {
-                    self.log(Some((&optimal_strategy, optimal_strategy_latency, current_strategy_latency)), true, cache_update);
+                let absolute_latency_improvement =
+                    optimal_strategy_latency - current_strategy_latency;
+                let relative_latency_improvement =
+                    optimal_strategy_latency / current_strategy_latency;
+                if absolute_latency_improvement < -2.
+                    && relative_latency_improvement < self.optimize_threshold
+                {
+                    self.log(
+                        Some((
+                            &optimal_strategy,
+                            optimal_strategy_latency,
+                            current_strategy_latency,
+                        )),
+                        true,
+                        cache_update,
+                    );
                     self.reconfigure_strategy(optimal_strategy).await;
                 } else {
-                    self.log(Some((&self.strategy, optimal_strategy_latency, current_strategy_latency)), false, cache_update);
+                    self.log(
+                        Some((
+                            &self.strategy,
+                            optimal_strategy_latency,
+                            current_strategy_latency,
+                        )),
+                        false,
+                        cache_update,
+                    );
                 }
             } else {
                 self.log(None, false, cache_update)
@@ -155,12 +186,12 @@ impl OmniPaxosServer {
 
     async fn reconfigure_strategy(&mut self, optimal_strategy: ClusterStrategy) {
         if optimal_strategy.leader != self.omnipaxos.get_current_leader().unwrap() {
-            self.omnipaxos.relinquish_leadership(optimal_strategy.leader);
+            self.omnipaxos
+                .relinquish_leadership(optimal_strategy.leader);
             self.send_outgoing_msgs().await;
         }
         if optimal_strategy.read_quorum_size != self.strategy.read_quorum_size {
-            let write_quorum_size =
-                self.nodes.len() - optimal_strategy.read_quorum_size + 1;
+            let write_quorum_size = self.nodes.len() - optimal_strategy.read_quorum_size + 1;
             let new_config = ClusterConfig {
                 configuration_id: 1,
                 nodes: self.nodes.clone(),
@@ -254,7 +285,12 @@ impl OmniPaxosServer {
             }
             Incoming::ClusterMessage(from, ClusterMessage::MetricSync(sync)) => {
                 if let Some((to, reply)) = self.metrics_server.handle_metric_sync(from, sync) {
-                    self.network.send(Outgoing::ClusterMessage(to, ClusterMessage::MetricSync(reply))).await;
+                    self.network
+                        .send(Outgoing::ClusterMessage(
+                            to,
+                            ClusterMessage::MetricSync(reply),
+                        ))
+                        .await;
                 }
             }
             Incoming::ClusterMessage(from, ClusterMessage::ReadStrategyUpdate(strat)) => {
@@ -265,35 +301,54 @@ impl OmniPaxosServer {
 
     async fn handle_client_request(&mut self, from: ClientId, request: ClientMessage) {
         match request {
-            ClientMessage::Append(command_id, kv_command) => {
-                match &kv_command {
-                    KVCommand::Put(..) => {
-                        self.metrics_server.local_write();
-                        self.commit_command_to_log(from, command_id, kv_command).await;
-                    }
-                    KVCommand::Delete(_) => {
-                        self.metrics_server.local_write();
-                        self.commit_command_to_log(from, command_id, kv_command).await;
-                    }
-                    KVCommand::Get(_) => {
-                        self.metrics_server.local_read();
-                        self.handle_read_request(from, command_id, kv_command).await;
-                    }
+            ClientMessage::Append(command_id, kv_command) => match &kv_command {
+                KVCommand::Put(..) => {
+                    self.metrics_server.local_write();
+                    self.commit_command_to_log(from, command_id, kv_command)
+                        .await;
                 }
-            }
+                KVCommand::Delete(_) => {
+                    self.metrics_server.local_write();
+                    self.commit_command_to_log(from, command_id, kv_command)
+                        .await;
+                }
+                KVCommand::Get(_) => {
+                    self.metrics_server.local_read();
+                    self.handle_read_request(from, command_id, kv_command).await;
+                }
+            },
         };
     }
 
-    async fn handle_read_request(&mut self, from: ClientId, command_id: CommandId, kv_command: KVCommand) {
+    async fn handle_read_request(
+        &mut self,
+        from: ClientId,
+        command_id: CommandId,
+        kv_command: KVCommand,
+    ) {
         let read_strat = self.strategy.read_strategies[self.id as usize - 1];
         match read_strat {
-            ReadStrategy::ReadAsWrite => self.commit_command_to_log(from, command_id, kv_command).await,
-            ReadStrategy::QuorumRead => self.start_quorum_read(from, command_id, kv_command, false).await,
-            ReadStrategy::BallotRead => self.start_quorum_read(from, command_id, kv_command, true).await,
+            ReadStrategy::ReadAsWrite => {
+                self.commit_command_to_log(from, command_id, kv_command)
+                    .await
+            }
+            ReadStrategy::QuorumRead => {
+                self.start_quorum_read(from, command_id, kv_command, false)
+                    .await
+            }
+            ReadStrategy::BallotRead => {
+                self.start_quorum_read(from, command_id, kv_command, true)
+                    .await
+            }
         }
     }
 
-    async fn commit_command_to_log(&mut self, from: ClientId, command_id: CommandId, kv_command: KVCommand) {
+    async fn commit_command_to_log(
+        &mut self,
+        from: ClientId,
+        command_id: CommandId,
+        kv_command: KVCommand,
+    ) {
         let command = Command {
             client_id: from,
             coordinator_id: self.id,
@@ -335,7 +390,13 @@ impl OmniPaxosServer {
         }
     }
 
-    async fn start_quorum_read(&mut self, client_id: ClientId, command_id: CommandId, read_command: KVCommand, enable_ballot_read: bool) {
+    async fn start_quorum_read(
+        &mut self,
+        client_id: ClientId,
+        command_id: CommandId,
+        read_command: KVCommand,
+        enable_ballot_read: bool,
+    ) {
         debug!("Starting q read: {read_command:?}");
         self.quorum_reader.new_read(
             client_id,
@@ -363,7 +424,9 @@ impl OmniPaxosServer {
     async fn send_strat(&mut self) {
         let msg = ClusterMessage::ReadStrategyUpdate(self.strategy.read_strategies.clone());
         for peer in self.omnipaxos.get_peers() {
-            self.network.send(Outgoing::ClusterMessage(*peer, msg.clone())).await;
+            self.network
+                .send(Outgoing::ClusterMessage(*peer, msg.clone()))
+                .await;
         }
     }
 
@@ -371,17 +434,27 @@ impl OmniPaxosServer {
     fn handle_read_strategy_update(&mut self, _from: NodeId, read_strat: Vec<ReadStrategy>) {
         self.strategy.read_strategies = read_strat
     }
- 
-    fn log(&self, strategy: Option<(&ClusterStrategy, f64, f64)>, new_strat: bool, cache_update: bool) {
+
+    fn log(
+        &self,
+        strategy: Option<(&ClusterStrategy, f64, f64)>,
+        new_strat: bool,
+        cache_update: bool,
+    ) {
         let timestamp = Utc::now().timestamp_millis();
         let leader = self.omnipaxos.get_current_leader();
         let read_quorum = self.omnipaxos.get_read_config().read_quorum_size;
-        let node_strat = leader.map(|l| self.optimizer.get_optimal_node_strat(l, read_quorum, self.id));
+        let node_strat = leader.map(|l| {
+            self.optimizer
+                .get_optimal_node_strat(l, read_quorum, self.id)
+        });
         let leader_json = serde_json::to_string(&leader).unwrap();
         let operation_latency_json = serde_json::to_string(&node_strat).unwrap();
         let metrics_json = serde_json::to_string(&self.metrics_server.metrics).unwrap();
-        let opt_strategy_latency = strategy.map(|s| s.1 / self.metrics_server.metrics.get_total_load());
-        let curr_strategy_latency = strategy.map(|s| s.2 / self.metrics_server.metrics.get_total_load());
+        let opt_strategy_latency =
+            strategy.map(|s| s.1 / self.metrics_server.metrics.get_total_load());
+        let curr_strategy_latency =
+            strategy.map(|s| s.2 / self.metrics_server.metrics.get_total_load());
         let strategy_json = match strategy {
             Some((strat, _, _)) => serde_json::to_string(strat).unwrap(),
             None => serde_json::to_string(&None::<ClusterStrategy>).unwrap(),
