@@ -1,10 +1,10 @@
 use std::net::{SocketAddr, ToSocketAddrs};
-use tokio::net::TcpStream;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
+use tokio::net::TcpStream;
 use tokio_serde::{formats::Bincode, Framed};
 use tokio_util::codec::{Framed as CodecFramed, FramedRead, FramedWrite, LengthDelimitedCodec};
 
-use crate::{messages::NetworkMessage, kv::NodeId};
+use crate::{kv::NodeId, messages::NetworkMessage};
 
 pub type Connection = Framed<
     CodecFramed<TcpStream, LengthDelimitedCodec>,

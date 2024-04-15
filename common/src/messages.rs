@@ -1,4 +1,7 @@
-use omnipaxos::{ballot_leader_election::Ballot, messages::Message as OmniPaxosMessage, storage::ReadQuorumConfig, util::NodeId};
+use omnipaxos::{
+    ballot_leader_election::Ballot, messages::Message as OmniPaxosMessage,
+    storage::ReadQuorumConfig, util::NodeId,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::kv::{ClientId, Command, CommandId, KVCommand};
@@ -39,7 +42,7 @@ pub enum ClusterMessage {
     QuorumReadRequest(QuorumReadRequest),
     QuorumReadResponse(QuorumReadResponse),
     MetricSync(MetricSync),
-    ReadStrategyUpdate(Vec<ReadStrategy>)
+    ReadStrategyUpdate(Vec<ReadStrategy>),
 }
 
 // next
@@ -69,7 +72,7 @@ pub struct QuorumReadResponse {
     pub command_id: CommandId,
     pub read_quorum_config: ReadQuorumConfig,
     pub accepted_idx: usize,
-    pub ballot_read: BallotRead
+    pub ballot_read: BallotRead,
 }
 
 impl QuorumReadResponse {
@@ -78,7 +81,7 @@ impl QuorumReadResponse {
         client_id: ClientId,
         command_id: CommandId,
         read_quorum_config: ReadQuorumConfig,
-        accepted_idx: usize,    
+        accepted_idx: usize,
         promise: Ballot,
         leader: NodeId,
         decided_idx: usize,
@@ -90,7 +93,7 @@ impl QuorumReadResponse {
             command_id,
             read_quorum_config,
             accepted_idx,
-            ballot_read
+            ballot_read,
         }
     }
 }
@@ -111,7 +114,7 @@ impl BallotRead {
     ) -> Self {
         if my_id == leader {
             let rinse_idx = match max_prom_acc_idx {
-                Some(idx)=> Some(decided_idx.max(idx)),
+                Some(idx) => Some(decided_idx.max(idx)),
                 _ => None,
             };
             BallotRead::Leader((promise, leader), rinse_idx)
@@ -124,14 +127,14 @@ impl BallotRead {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum MetricSync {
     MetricRequest(u64, MetricUpdate),
-    MetricReply(u64, MetricUpdate)
+    MetricReply(u64, MetricUpdate),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MetricUpdate {
     pub latency: Vec<f64>,
     pub load: (f64, f64),
-} 
+}
 
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ReadStrategy {

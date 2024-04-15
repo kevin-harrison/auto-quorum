@@ -1,14 +1,14 @@
-use std::{env, fs};
 use crate::server::{OmniPaxosServer, OmniPaxosServerConfig};
-use omnipaxos::OmniPaxosConfig;
 use env_logger;
+use omnipaxos::OmniPaxosConfig;
+use std::{env, fs};
 use toml;
 
 mod database;
-mod optimizer;
 mod metrics;
-mod read;
 mod network;
+mod optimizer;
+mod read;
 mod server;
 
 #[tokio::main]

@@ -39,7 +39,11 @@ pub struct Network {
 }
 
 impl Network {
-    pub async fn new(id: NodeId, peers: Vec<NodeId>, local_deployment: bool) -> Result<Self, Error> {
+    pub async fn new(
+        id: NodeId,
+        peers: Vec<NodeId>,
+        local_deployment: bool,
+    ) -> Result<Self, Error> {
         let (connection_sink, connection_source) = mpsc::channel(100);
         let (message_sink, message_source) = mpsc::channel(100);
         let port = 8000 + id as u16;
@@ -74,7 +78,7 @@ impl Network {
             Err(e) => {
                 log::error!("Error resolving DNS name of node {to}: {e}");
                 return;
-            },
+            }
         };
         tokio::spawn(async move {
             match TcpStream::connect(to_address).await {

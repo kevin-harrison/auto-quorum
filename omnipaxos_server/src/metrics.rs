@@ -1,5 +1,8 @@
+use common::{
+    kv::NodeId,
+    messages::{MetricSync, MetricUpdate},
+};
 use serde::Serialize;
-use common::{kv::NodeId, messages::{MetricSync, MetricUpdate}};
 use tokio::time::Instant;
 
 const LATENCY_CAP: f64 = 9999.;
@@ -40,8 +43,11 @@ pub struct ClusterMetrics {
 
 impl std::fmt::Debug for ClusterMetrics {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let node_metrics: Vec<String> = self.workload.iter().enumerate()
-            .map(|(i, node)| format!("node: {}, workload: {node:?}", i+1))
+        let node_metrics: Vec<String> = self
+            .workload
+            .iter()
+            .enumerate()
+            .map(|(i, node)| format!("node: {}, workload: {node:?}", i + 1))
             .collect();
         let latency_string = self
             .latencies
@@ -99,7 +105,11 @@ impl MetricsHeartbeatServer {
         self.local_writes += 1.;
     }
 
-    pub fn handle_metric_sync(&mut self, from: NodeId, metric_sync: MetricSync) -> Option<(NodeId, MetricSync)> {
+    pub fn handle_metric_sync(
+        &mut self,
+        from: NodeId,
+        metric_sync: MetricSync,
+    ) -> Option<(NodeId, MetricSync)> {
         let from_idx = from as usize - 1;
         match metric_sync {
             MetricSync::MetricRequest(round, metric_update) => {
@@ -113,7 +123,7 @@ impl MetricsHeartbeatServer {
                 };
                 let reply = MetricSync::MetricReply(round, current_metrics);
                 Some((from, reply))
-            },
+            }
             MetricSync::MetricReply(round, metric_update) => {
                 if round == self.round {
                     let reply_latency = self.get_round_delay();
@@ -125,7 +135,7 @@ impl MetricsHeartbeatServer {
                     self.replies_status[from_idx] = ReplyStatus::Replied;
                 }
                 None
-            },
+            }
         }
     }
 
@@ -158,8 +168,10 @@ impl MetricsHeartbeatServer {
                             *latency += round_delay;
                         }
                     }
-                    self.metrics.workload[from].reads += self.workload_smoothing_factor * (0. - self.metrics.workload[from].reads);
-                    self.metrics.workload[from].writes += self.workload_smoothing_factor * (0. - self.metrics.workload[from].writes);
+                    self.metrics.workload[from].reads +=
+                        self.workload_smoothing_factor * (0. - self.metrics.workload[from].reads);
+                    self.metrics.workload[from].writes +=
+                        self.workload_smoothing_factor * (0. - self.metrics.workload[from].writes);
                 }
                 ReplyStatus::Replied => *reply_status = ReplyStatus::Pending,
             }
@@ -175,7 +187,16 @@ impl MetricsHeartbeatServer {
             latency: vec![],
             load: self.my_load_tuple(),
         };
-        let round_requests = self.peers.iter().map(|peer| (*peer, MetricSync::MetricRequest(self.round, request_metric.clone()))).collect();
+        let round_requests = self
+            .peers
+            .iter()
+            .map(|peer| {
+                (
+                    *peer,
+                    MetricSync::MetricRequest(self.round, request_metric.clone()),
+                )
+            })
+            .collect();
         round_requests
     }
 

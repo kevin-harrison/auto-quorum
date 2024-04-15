@@ -1,11 +1,11 @@
 use chrono::Utc;
 use futures::SinkExt;
 use rand::Rng;
+use serde::{Deserialize, Serialize};
 use std::time::Duration;
-use serde::{Serialize, Deserialize};
 
-use tokio::time::interval;
 use tokio::net::TcpStream;
+use tokio::time::interval;
 use tokio_stream::StreamExt;
 
 use common::util::{get_node_addr, wrap_stream, Connection as ServerConnection};
@@ -157,7 +157,11 @@ impl Client {
         };
         self.request_data.push(data);
         self.command_id += 1;
-        if let Err(e) = self.server.send(NetworkMessage::ClientMessage(request)).await {
+        if let Err(e) = self
+            .server
+            .send(NetworkMessage::ClientMessage(request))
+            .await
+        {
             log::error!("Couldn't send command to server: {e}");
         }
     }
@@ -167,7 +171,10 @@ impl Client {
             NetworkMessage::ServerMessage(response) => {
                 let cmd_id = response.command_id();
                 let response_time = Utc::now().timestamp_millis();
-                self.request_data[cmd_id].response = Some(Response {time_recieved_utc: response_time, message: response});
+                self.request_data[cmd_id].response = Some(Response {
+                    time_recieved_utc: response_time,
+                    message: response,
+                });
             }
             _ => panic!("Recieved unexpected message: {msg:?}"),
         }

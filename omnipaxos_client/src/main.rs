@@ -1,8 +1,8 @@
-use std::{env, fs};
-use toml;
-use client::{Client, ClientConfig};
 use chrono::Utc;
+use client::{Client, ClientConfig};
+use std::{env, fs};
 use tokio::time::Duration;
+use toml;
 
 mod client;
 

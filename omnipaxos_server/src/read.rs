@@ -1,6 +1,6 @@
 use omnipaxos::{ballot_leader_election::Ballot, storage::ReadQuorumConfig, util::NodeId};
-use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::collections::HashMap;
 
 use common::{
     kv::{ClientId, Command, CommandId, KVCommand},
@@ -64,19 +64,28 @@ impl PendingRead {
             BallotRead::Follows(key) => key,
             BallotRead::Leader(key, _) => key,
         };
-        if let Some(ballot_read_state) = self.ballot_reads.iter_mut().find(|s| s.leader_key == leader_key) {
+        if let Some(ballot_read_state) = self
+            .ballot_reads
+            .iter_mut()
+            .find(|s| s.leader_key == leader_key)
+        {
             ballot_read_state.update(response.ballot_read);
             if ballot_read_state.ballot_rinse_idx.is_some()
-               && ballot_read_state.num_follower_replies >= self.read_quorum_config.read_quorum_size {
-                   self.ballot_rinse_discovered = true;
-                   match self.rinse_idx {
-                       None => self.rinse_idx = ballot_read_state.ballot_rinse_idx,
-                       Some(ref mut idx) if ballot_read_state.ballot_rinse_idx.unwrap() < *idx => *idx = ballot_read_state.ballot_rinse_idx.unwrap(),
-                       _ => (),
-                   }
+                && ballot_read_state.num_follower_replies
+                    >= self.read_quorum_config.read_quorum_size
+            {
+                self.ballot_rinse_discovered = true;
+                match self.rinse_idx {
+                    None => self.rinse_idx = ballot_read_state.ballot_rinse_idx,
+                    Some(ref mut idx) if ballot_read_state.ballot_rinse_idx.unwrap() < *idx => {
+                        *idx = ballot_read_state.ballot_rinse_idx.unwrap()
+                    }
+                    _ => (),
+                }
             }
         } else {
-            self.ballot_reads.push(BallotReadState::new(response.ballot_read));
+            self.ballot_reads
+                .push(BallotReadState::new(response.ballot_read));
         };
     }
 }
@@ -111,7 +120,6 @@ impl BallotReadState {
     }
 }
 
-
 pub struct QuorumReader {
     id: NodeId,
     pending_reads: HashMap<CommandKey, PendingRead>,
@@ -140,7 +148,13 @@ impl QuorumReader {
     ) {
         let ballot_read = BallotRead::new(self.id, promise, leader, decided_idx, max_prom_acc_idx);
         let cmd_key = (client_id, command_id);
-        let pending_read = PendingRead::new(read_command, read_quorum_config, accepted_idx, ballot_read, ballot_read_enabled);
+        let pending_read = PendingRead::new(
+            read_command,
+            read_quorum_config,
+            accepted_idx,
+            ballot_read,
+            ballot_read_enabled,
+        );
         self.pending_reads.insert(cmd_key, pending_read);
     }
 
@@ -166,7 +180,7 @@ impl QuorumReader {
                     };
                     log::debug!("Rinsing {read_command:?}, rinse_idx = {idx}");
                     return Some(read_command);
-                },
+                }
                 _ => return None,
             }
         }
@@ -188,8 +202,8 @@ impl QuorumReader {
                     log::debug!("Rinsing {read_command:?}, rinse_idx = {idx}");
                     ready_reads.push(read_command);
                     false
-                },
-                _ => true
+                }
+                _ => true,
             }
         });
         ready_reads
