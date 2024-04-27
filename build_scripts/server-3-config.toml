@@ -3,6 +3,7 @@ initial_leader = 1
 local_deployment = true
 optimize = OPTIMIZE
 optimize_threshold = 0.97
+initial_read_strat = ["ReadAsWrite", "ReadAsWrite", "ReadAsWrite"]
 
 [cluster_config]
 configuration_id = 1

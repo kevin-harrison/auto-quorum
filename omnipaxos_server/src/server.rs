@@ -27,7 +27,7 @@ pub struct OmniPaxosServerConfig {
     pub optimize_threshold: Option<f64>,
     pub congestion_control: Option<bool>,
     pub local_deployment: Option<bool>,
-    pub initial_read_strat: Option<ReadStrategy>,
+    pub initial_read_strat: Option<Vec<ReadStrategy>>,
 }
 
 type OmniPaxosInstance = OmniPaxos<Command, MemoryStorage<Command>>;
@@ -63,12 +63,18 @@ impl OmniPaxosServer {
             .unwrap();
         let metrics_server = MetricsHeartbeatServer::new(server_id, nodes.clone());
         let init_read_quorum = omnipaxos.get_read_config().read_quorum_size;
-        let init_read_strat = server_config.initial_read_strat.unwrap_or_default();
+        let init_read_strat = match server_config.initial_read_strat {
+            Some(strats) => {
+                assert_eq!(strats.len(), nodes.len());
+                strats
+            }
+            None => vec![ReadStrategy::default(); nodes.len()],
+        };
         let init_strat = ClusterStrategy {
             leader: server_id,
             read_quorum_size: init_read_quorum,
             write_quorum_size: nodes.len() - init_read_quorum + 1,
-            read_strategies: vec![init_read_strat; nodes.len()],
+            read_strategies: init_read_strat,
         };
         let optimizer = ClusterOptimizer::new(nodes.clone());
         let mut server = OmniPaxosServer {
