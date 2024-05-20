@@ -27,7 +27,6 @@ struct Response {
 pub struct ClientConfig {
     location: String,
     server_id: u64,
-    read_ratio: f64,
     request_rate_intervals: Vec<RequestInterval>,
     local_deployment: Option<bool>,
     kill_signal_sec: Option<u64>,
@@ -38,6 +37,7 @@ pub struct ClientConfig {
 pub struct RequestInterval {
     duration_sec: u64,
     requests_per_sec: u64,
+    read_ratio: f64,
 }
 
 impl RequestInterval {
@@ -46,6 +46,9 @@ impl RequestInterval {
     }
 
     fn get_request_delay(self) -> Duration {
+        if self.requests_per_sec == 0 {
+            return Duration::from_secs(999999);
+        }
         let delay_ms = 1000 / self.requests_per_sec;
         assert!(delay_ms != 0);
         Duration::from_millis(delay_ms)
@@ -56,7 +59,6 @@ pub struct Client {
     server: ServerConnection,
     command_id: CommandId,
     request_data: Vec<RequestData>,
-    read_ratio: f64,
     request_rate_intervals: Vec<RequestInterval>,
     kill_signal_sec: Option<u64>,
 }
@@ -74,7 +76,6 @@ impl Client {
             server: wrap_stream(server_stream),
             command_id: 0,
             request_data: Vec::with_capacity(8000),
-            read_ratio: config.read_ratio,
             request_rate_intervals: config.request_rate_intervals,
             kill_signal_sec: config.kill_signal_sec,
         };
@@ -102,12 +103,15 @@ impl Client {
         let intervals = self.request_rate_intervals.clone();
         let mut intervals = intervals.iter();
         let first_interval = intervals.next().unwrap();
+        let mut read_ratio = first_interval.read_ratio;
         let mut request_interval = interval(first_interval.get_request_delay());
         let mut next_interval = interval(first_interval.get_interval_duration());
         let mut kill_interval = match self.kill_signal_sec {
+            Some(0) => interval(Duration::from_millis(1)),
             Some(sec_until_kill) => interval(Duration::from_secs(sec_until_kill)),
             None => interval(Duration::from_secs(999999)),
         };
+        request_interval.tick().await;
         next_interval.tick().await;
         kill_interval.tick().await;
 
@@ -117,7 +121,7 @@ impl Client {
                 Some(msg) = self.server.next() => self.handle_response(msg.unwrap()),
                 _ = request_interval.tick() => {
                     let key = self.command_id.to_string();
-                    if rng.gen::<f64>() < self.read_ratio {
+                    if rng.gen::<f64>() < read_ratio {
                         self.get(key).await;
                     } else {
                         self.put(key.clone(), key).await;
@@ -125,6 +129,7 @@ impl Client {
                 },
                 _ = next_interval.tick() => {
                     if let Some(new_interval) = intervals.next() {
+                        read_ratio = new_interval.read_ratio;
                         next_interval = interval(new_interval.get_interval_duration());
                         next_interval.tick().await;
                         request_interval = interval(new_interval.get_request_delay());
@@ -135,6 +140,9 @@ impl Client {
                 // Hardcoded for a specific benchmark
                 _ = kill_interval.tick(), if self.kill_signal_sec.is_some() => {
                     self.send_kill_signal().await;
+                    self.kill_signal_sec = None;
+                    kill_interval = interval(Duration::from_secs(999999));
+                    kill_interval.tick().await;
                     let server_address =
                         get_node_addr(6, false).expect("Couldn't resolve server IP");
                     let server_stream = TcpStream::connect(server_address)

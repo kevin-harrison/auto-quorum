@@ -98,7 +98,7 @@ impl OmniPaxosServer {
     pub async fn run(&mut self, initial_leader: Option<NodeId>) {
         let mut election_interval = tokio::time::interval(Duration::from_millis(1000));
         let mut optimize_interval = tokio::time::interval(Duration::from_millis(1000));
-        let mut init_leader_interval = tokio::time::interval(Duration::from_secs(10));
+        let mut init_leader_interval = tokio::time::interval(Duration::from_secs(20));
         let mut initialized_leader = match initial_leader {
             Some(_) => false,
             None => true,
@@ -205,6 +205,7 @@ impl OmniPaxosServer {
                     read_quorum_size: optimal_strategy.read_quorum_size,
                     write_quorum_size,
                 }),
+                initial_leader: None,
             };
             self.omnipaxos
                 .reconfigure_joint_consensus(new_config)
