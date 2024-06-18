@@ -1,24 +1,10 @@
-# omnipaxos-reconfiguration-service
-
-Our project is an implementation of the project described in the project info as "2.2.1 Service layer for reconfiguration". We created a fault-tolerant server which maintains an Omnipaxos log with a cluster of similar servers (nodes). The cluster is able to be reconfigured by adding or removing nodes from the cluster. We also created a bare bones client which serves to give commands to the server such as appending to the log and initiating a reconfiguration.
+# AutoQuroum
+AutoQuorum is a runtime optimizer for leader-based SMR protocols such as Paxos and Raft, providing the ability to automatically reconfigure according to the workload. AutoQuorum is embedded into the protocol logic at each node, where it collects metadata and exchanges it with the other nodes. This enables AutoQuorum to construct a global view of the system and workload that is used to compute the optimal configuration for the system. If the current configuration is not optimal, the leader triggers a reconfiguration to modify the leadership and quorum sizes accordingly. To seamlessly switch between different configurations, AutoQuorum introduces a reconfiguration mechanism that enables changing the configuration parameters without stopping the system. This is accompanied by a novel decentralized read operation that can be performed by any server even during reconfiguration, which allows AutoQuorum to have minimal effect on availability.
 
 # How to run
-The following commands assume that the repo root is your working directory.
-
-## Running a server with debug info:
-```console
-RUST_LOG=error,omnipaxos_server=debug cargo run -p omnipaxos_server <server's-node-id>
-```
-Note that the first configuration of nodes require configuration files in the `/config/` folder to start. To create files resulting in a simple first configuration you can run `clean.sh`.
-
-## Running client requests:
-```console
-cargo run -p omnipaxos_client append 1 2 a 55
-```
-Sends a request to node with id `1` to append `KeyValue { key=a value=55}` to configuration with id `2`.
-
-```console
-cargo run -p omnipaxos_client reconfig 5 1 2 3
-```
-Sends a request to node with id `5` to propose a reconfiguration with a new cluster consisting of only nodes with id `1`, `2`, and `3`.
-Note: only nodes 1-5 have IP addresses defined (in both the server and client's main.rs).
+The `build_scripts` directory contains various utilities for configuring and running AutoQuorum clients and servers. Also contains examples of TOML file configuration.
+ - `run-local-client.sh` runs two clients in separate local processes for the given server IDs. Delays start time to ensure synced start.
+ - `run-local-cluster.sh` runs a server cluster with a given cluster size in separate local processes.
+ - `push-client-image.sh` builds the client docker image and pushes it to the benchmarking GCP project's artifact registry
+ - `push-server-image.sh` builds the server docker image and pushes it to the benchmarking GCP project's artifact registry
+ - `docker-compose.yml` docker compose for a 3 server cluster. TODO: needs updating
