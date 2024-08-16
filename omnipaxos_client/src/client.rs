@@ -118,7 +118,10 @@ impl Client {
         loop {
             tokio::select! {
                 biased;
+                // Handle the next server message when it arrives
                 Some(msg) = self.server.next() => self.handle_response(msg.unwrap()),
+                // Send request according to rate of current request interval setting. (defined in
+                    // TOML config)
                 _ = request_interval.tick() => {
                     let key = self.command_id.to_string();
                     if rng.gen::<f64>() < read_ratio {
@@ -127,6 +130,7 @@ impl Client {
                         self.put(key.clone(), key).await;
                     }
                 },
+                // Go to the next request interval setting. (defined in TOML config)
                 _ = next_interval.tick() => {
                     if let Some(new_interval) = intervals.next() {
                         read_ratio = new_interval.read_ratio;
@@ -137,10 +141,12 @@ impl Client {
                         break;
                     }
                 },
-                // Hardcoded for a specific benchmark
+                // Hardcoded for a specific benchmark. Tells current server to "crash" and then
+                    // connects to server 6.
                 _ = kill_interval.tick(), if self.kill_signal_sec.is_some() => {
                     self.send_kill_signal().await;
                     self.kill_signal_sec = None;
+                    // Makes sure kill_internal.tick() never resolves again
                     kill_interval = interval(Duration::from_secs(999999));
                     kill_interval.tick().await;
                     let server_address =

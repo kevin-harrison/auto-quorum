@@ -25,7 +25,7 @@ pub struct ClusterOptimizer {
     num_nodes: usize,
     cached_latencies: Vec<Vec<f64>>,
     cached_quorum_latencies: Vec<Vec<(usize, f64)>>,
-    // rows = leader, cols = read quorum_size, depth = node
+    // For cached_strats: rows = leader, cols = read quorum_size, depth = node
     cached_strats: Vec<Vec<Vec<NodeStrategy>>>,
     quorum_indices: Vec<(usize, usize)>,
     invalidate_cache_threshold: f64,

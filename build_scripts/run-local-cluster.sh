@@ -20,6 +20,7 @@ trap "cleanup" EXIT
 # sudo tc qdisc add dev lo root netem delay 100msec
 for ((i = 1; i <= cluster_size; i++)); do
     config_path="./server-${i}-config.toml"
+    # Set log path and optimize setting in TOML config file depending on arg 2
     if [ -z "$2" ]; then
         sed -i "s/OPTIMIZE/true/g" "$config_path" &&
         log_path="../../auto-quorum-benchmark/logs/test-local_server-${i}.log"
