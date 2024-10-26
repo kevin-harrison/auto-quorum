@@ -1,4 +1,5 @@
 use anyhow::Error;
+use auto_quorum::common::{kv::ClientId, messages::*, utils::*};
 use futures::{SinkExt, Stream, StreamExt};
 use log::*;
 use omnipaxos::messages::ballot_leader_election::BLEMsg;
@@ -12,8 +13,6 @@ use std::task::{Context, Poll};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::{Receiver, Sender};
-
-use common::{kv::ClientId, messages::*, util::*};
 
 enum ConnectionId {
     ClientConnection(ClientId),
@@ -271,7 +270,7 @@ impl Network {
             if let Err(err) = writer.send(net_msg).await {
                 warn!("Couldn't send message to client {to}: {err}");
                 warn!("Removing connection to client {to}");
-                self.cluster_connections.remove(&to);
+                self.client_connections.remove(&to);
             }
         } else {
             warn!("Not connected to client {to}");

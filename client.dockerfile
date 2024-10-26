@@ -1,14 +1,14 @@
 FROM rust:1.76 as chef
 
+# Stop if a command fails
+RUN set -eux
+
 # Only fetch crates.io index for used crates
 ENV CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse
 
-# We only pay the installation cost once,
-# it will be cached from the second build onwards
+# cargo-chef will be cached from the second build onwards
 RUN cargo install cargo-chef
 WORKDIR app
-# Stop if a command fails
-RUN set -eux
 
 FROM chef AS planner
 COPY . .
@@ -26,4 +26,5 @@ RUN cargo build --release --bin client
 FROM debian:bookworm-slim AS runtime
 WORKDIR app
 COPY --from=builder /app/target/release/client /usr/local/bin
+EXPOSE 8000
 ENTRYPOINT ["/usr/local/bin/client"]

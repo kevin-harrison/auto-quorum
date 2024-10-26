@@ -1,15 +1,15 @@
+use auto_quorum::common::{
+    kv::*,
+    messages::*,
+    utils::{get_node_addr, wrap_stream, Connection as ServerConnection},
+};
 use chrono::Utc;
-use futures::SinkExt;
+use futures::{SinkExt, StreamExt};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
-
 use tokio::net::TcpStream;
 use tokio::time::interval;
-use tokio_stream::StreamExt;
-
-use common::util::{get_node_addr, wrap_stream, Connection as ServerConnection};
-use common::{kv::*, messages::*};
 
 #[derive(Debug, Serialize)]
 struct RequestData {

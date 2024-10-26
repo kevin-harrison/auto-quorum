@@ -1,4 +1,4 @@
-use common::{
+use auto_quorum::common::{
     kv::NodeId,
     messages::{MetricSync, MetricUpdate},
 };

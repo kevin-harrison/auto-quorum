@@ -1,15 +1,3 @@
-use chrono::Utc;
-use futures::StreamExt;
-use log::*;
-use serde::{Deserialize, Serialize};
-use std::time::Duration;
-
-use omnipaxos::{
-    util::{FlexibleQuorum, LogEntry, NodeId},
-    ClusterConfig, OmniPaxos, OmniPaxosConfig,
-};
-use omnipaxos_storage::memory_storage::MemoryStorage;
-
 use crate::{
     database::Database,
     metrics::MetricsHeartbeatServer,
@@ -17,7 +5,17 @@ use crate::{
     optimizer::{ClusterOptimizer, ClusterStrategy},
     read::QuorumReader,
 };
-use common::{kv::*, messages::*};
+use auto_quorum::common::{kv::*, messages::*};
+use chrono::Utc;
+use futures::StreamExt;
+use log::*;
+use omnipaxos::{
+    util::{FlexibleQuorum, LogEntry, NodeId},
+    ClusterConfig, OmniPaxos, OmniPaxosConfig,
+};
+use omnipaxos_storage::memory_storage::MemoryStorage;
+use serde::{Deserialize, Serialize};
+use std::time::Duration;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct OmniPaxosServerConfig {

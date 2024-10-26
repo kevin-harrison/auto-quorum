@@ -2,7 +2,7 @@ use omnipaxos::{ballot_leader_election::Ballot, storage::ReadQuorumConfig, util:
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 
-use common::{
+use auto_quorum::common::{
     kv::{ClientId, Command, CommandId, KVCommand},
     messages::{BallotRead, QuorumReadResponse},
 };

@@ -1,4 +1,4 @@
-use common::{kv::NodeId, messages::ReadStrategy};
+use auto_quorum::common::{kv::NodeId, messages::ReadStrategy};
 use serde::Serialize;
 
 use crate::metrics::Load;
