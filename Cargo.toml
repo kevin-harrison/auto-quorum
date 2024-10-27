@@ -16,7 +16,6 @@ omnipaxos = { git = "https://github.com/kevin-harrison/omnipaxos.git", branch = 
 omnipaxos_storage = { git = "https://github.com/kevin-harrison/omnipaxos.git", branch = "auto-quorum" }
 toml = "0.8.19"
 chrono = "0.4.34"
-anyhow = "1.0.91"
 rand = "0.8.5"
 
 [[bin]]

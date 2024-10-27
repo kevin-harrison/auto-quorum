@@ -7,7 +7,6 @@ use crate::{
 };
 use auto_quorum::common::{kv::*, messages::*};
 use chrono::Utc;
-use futures::StreamExt;
 use log::*;
 use omnipaxos::{
     util::{FlexibleQuorum, LogEntry, NodeId},
@@ -16,9 +15,11 @@ use omnipaxos::{
 use omnipaxos_storage::memory_storage::MemoryStorage;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
+use tokio::{sync::mpsc::Receiver, time::interval};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct OmniPaxosServerConfig {
+    pub cluster_name: String,
     pub location: String,
     pub initial_leader: Option<NodeId>,
     pub optimize: Option<bool>,
@@ -35,6 +36,8 @@ pub struct OmniPaxosServer {
     nodes: Vec<NodeId>,
     database: Database,
     network: Network,
+    cluster_messages: Receiver<(NodeId, ClusterMessage)>,
+    client_messages: Receiver<(ClientId, ClientMessage)>,
     omnipaxos: OmniPaxosInstance,
     current_decided_idx: usize,
     quorum_reader: QuorumReader,
@@ -52,13 +55,15 @@ impl OmniPaxosServer {
     ) -> Self {
         let server_id = omnipaxos_config.server_config.pid;
         let nodes = omnipaxos_config.cluster_config.nodes.clone();
+        let peers: Vec<u64> = nodes
+            .iter()
+            .cloned()
+            .filter(|node| *node != server_id)
+            .collect();
         let local_deployment = server_config.local_deployment.unwrap_or(false);
         let optimize = server_config.optimize.unwrap_or(true);
         let storage: MemoryStorage<Command> = MemoryStorage::default();
         let omnipaxos = omnipaxos_config.build(storage).unwrap();
-        let network = Network::new(server_id, nodes.clone(), local_deployment)
-            .await
-            .unwrap();
         let metrics_server = MetricsHeartbeatServer::new(server_id, nodes.clone());
         let init_read_quorum = omnipaxos.get_read_config().read_quorum_size;
         let init_read_strat = match server_config.initial_read_strat {
@@ -75,11 +80,31 @@ impl OmniPaxosServer {
             read_strategies: init_read_strat,
         };
         let optimizer = ClusterOptimizer::new(nodes.clone());
+        // TODO: make this configurable
+        let initial_clients = if server_id == 1 || server_id == 2 {
+            1
+        } else {
+            0
+        };
+        let (cluster_message_sender, cluster_messages) = tokio::sync::mpsc::channel(1000);
+        let (client_message_sender, client_messages) = tokio::sync::mpsc::channel(1000);
+        let network = Network::new(
+            server_config.cluster_name,
+            server_id,
+            peers,
+            initial_clients,
+            local_deployment,
+            client_message_sender,
+            cluster_message_sender,
+        )
+        .await;
         let mut server = OmniPaxosServer {
             id: server_id,
             nodes,
             database: Database::new(),
             network,
+            cluster_messages,
+            client_messages,
             omnipaxos,
             current_decided_idx: 0,
             quorum_reader: QuorumReader::new(server_id),
@@ -89,14 +114,17 @@ impl OmniPaxosServer {
             optimize,
             optimize_threshold: server_config.optimize_threshold.unwrap_or(0.8),
         };
-        server.send_outgoing_msgs().await;
+        server.send_outgoing_msgs();
         server
     }
 
     pub async fn run(&mut self, initial_leader: Option<NodeId>) {
-        let mut election_interval = tokio::time::interval(Duration::from_millis(1000));
-        let mut optimize_interval = tokio::time::interval(Duration::from_millis(1000));
-        let mut init_leader_interval = tokio::time::interval(Duration::from_secs(20));
+        let buffer_size = 100;
+        let mut client_message_buffer = Vec::with_capacity(buffer_size);
+        let mut cluster_message_buffer = Vec::with_capacity(buffer_size);
+        let mut election_interval = interval(Duration::from_millis(1000));
+        let mut optimize_interval = interval(Duration::from_millis(1000));
+        let mut init_leader_interval = interval(Duration::from_secs(20));
         let mut initialized_leader = match initial_leader {
             Some(_) => false,
             None => true,
@@ -104,37 +132,42 @@ impl OmniPaxosServer {
         election_interval.tick().await;
         optimize_interval.tick().await;
         init_leader_interval.tick().await;
+        if self.id == 1 || self.id == 2 {
+            let msg = ServerMessage::Ready;
+            self.network.send_to_client(1, msg);
+        }
         loop {
             tokio::select! {
                 biased;
                 _ = election_interval.tick() => {
                     // TODO: revert BLE to stop tracking latency
-                    if let Some(latencies) = self.omnipaxos.tick() {
-                        self.send_outgoing_msgs().await;
+                    if let Some(_latencies) = self.omnipaxos.tick() {
+                        self.send_outgoing_msgs();
                     }
                 },
                 _ = optimize_interval.tick() => {
                     let requests = self.metrics_server.tick();
                     for (to, request) in requests {
                         let cluster_msg = ClusterMessage::MetricSync(request);
-                        self.network
-                            .send(Outgoing::ClusterMessage(to, cluster_msg))
-                            .await;
+                        self.network.send_to_cluster(to, cluster_msg);
                         }
-                    self.handle_optimize_timeout().await;
+                    self.handle_optimize_timeout();
                 },
                 _ = init_leader_interval.tick(), if !initialized_leader => {
                     initialized_leader = true;
-                    self.force_initial_leader_switch(initial_leader.unwrap()).await;
-                }
-                Some(msg) = self.network.next() => {
-                    self.handle_incoming_msg(msg.unwrap()).await;
+                    self.force_initial_leader_switch(initial_leader.unwrap());
+                },
+                _ = self.cluster_messages.recv_many(&mut cluster_message_buffer, buffer_size) => {
+                        self.handle_cluster_messages(&mut cluster_message_buffer);
+                    },
+                _ = self.client_messages.recv_many(&mut client_message_buffer, buffer_size) => {
+                    self.handle_client_messages(&mut client_message_buffer);
                 },
             }
         }
     }
 
-    async fn handle_optimize_timeout(&mut self) {
+    fn handle_optimize_timeout(&mut self) {
         if !self.optimize {
             self.log(None, false, false);
             return;
@@ -170,7 +203,7 @@ impl OmniPaxosServer {
                         true,
                         cache_update,
                     );
-                    self.reconfigure_strategy(optimal_strategy).await;
+                    self.reconfigure_strategy(optimal_strategy);
                 } else {
                     self.log(
                         Some((
@@ -188,11 +221,11 @@ impl OmniPaxosServer {
         }
     }
 
-    async fn reconfigure_strategy(&mut self, optimal_strategy: ClusterStrategy) {
+    fn reconfigure_strategy(&mut self, optimal_strategy: ClusterStrategy) {
         if optimal_strategy.leader != self.omnipaxos.get_current_leader().unwrap() {
             self.omnipaxos
                 .relinquish_leadership(optimal_strategy.leader);
-            self.send_outgoing_msgs().await;
+            self.send_outgoing_msgs();
         }
         if optimal_strategy.read_quorum_size != self.strategy.read_quorum_size {
             let write_quorum_size = self.nodes.len() - optimal_strategy.read_quorum_size + 1;
@@ -208,24 +241,24 @@ impl OmniPaxosServer {
             self.omnipaxos
                 .reconfigure_joint_consensus(new_config)
                 .unwrap();
-            self.send_outgoing_msgs().await;
+            self.send_outgoing_msgs();
         }
         if optimal_strategy.read_strategies != self.strategy.read_strategies {
             self.strategy.read_strategies = optimal_strategy.read_strategies.clone();
-            self.send_strat().await;
+            self.send_strat();
         }
     }
 
-    async fn force_initial_leader_switch(&mut self, initial_leader: NodeId) {
+    fn force_initial_leader_switch(&mut self, initial_leader: NodeId) {
         if let Some(current_leader) = self.omnipaxos.get_current_leader() {
             if current_leader == self.id {
                 self.omnipaxos.relinquish_leadership(initial_leader);
-                self.send_outgoing_msgs().await;
+                self.send_outgoing_msgs();
             }
         }
     }
 
-    async fn handle_decided_entries(&mut self) {
+    fn handle_decided_entries(&mut self) {
         let new_decided_idx = self.omnipaxos.get_decided_idx();
         if self.current_decided_idx < new_decided_idx {
             let decided_entries = self
@@ -237,15 +270,15 @@ impl OmniPaxosServer {
             let decided_commands = decided_entries.into_iter().filter_map(|e| match e {
                 LogEntry::Decided(cmd) => Some(cmd),
                 // TODO: handle snapshotted entries
+                LogEntry::Snapshotted(_) => unimplemented!(),
                 _ => None,
             });
             let ready_reads = self.quorum_reader.rinse(new_decided_idx);
-            self.update_database_and_respond(decided_commands.chain(ready_reads).collect())
-                .await;
+            self.update_database_and_respond(decided_commands.chain(ready_reads).collect());
         }
     }
 
-    async fn update_database_and_respond(&mut self, commands: Vec<Command>) {
+    fn update_database_and_respond(&mut self, commands: Vec<Command>) {
         // TODO: batching responses possible here.
         for command in commands {
             let read = self.database.handle_command(command.kv_cmd);
@@ -254,78 +287,80 @@ impl OmniPaxosServer {
                     Some(read_result) => ServerMessage::Read(command.id, read_result),
                     None => ServerMessage::Write(command.id),
                 };
-                self.network
-                    .send(Outgoing::ServerMessage(command.client_id, response))
-                    .await;
+                self.network.send_to_client(command.client_id, response);
             }
         }
     }
 
-    async fn send_outgoing_msgs(&mut self) {
+    fn send_outgoing_msgs(&mut self) {
         let messages = self.omnipaxos.outgoing_messages();
         for msg in messages {
             let to = msg.get_receiver();
             let cluster_msg = ClusterMessage::OmniPaxosMessage(msg);
-            self.network
-                .send(Outgoing::ClusterMessage(to, cluster_msg))
-                .await;
+            self.network.send_to_cluster(to, cluster_msg);
         }
     }
 
-    async fn handle_incoming_msg(&mut self, msg: Incoming) {
-        match msg {
-            Incoming::ClientMessage(from, request) => {
-                self.handle_client_request(from, request).await;
-            }
-            Incoming::ClusterMessage(_from, ClusterMessage::OmniPaxosMessage(m)) => {
-                self.omnipaxos.handle_incoming(m);
-                self.send_outgoing_msgs().await;
-                self.handle_decided_entries().await;
-            }
-            Incoming::ClusterMessage(from, ClusterMessage::QuorumReadRequest(req)) => {
-                self.handle_quorum_read_request(from, req).await;
-            }
-            Incoming::ClusterMessage(from, ClusterMessage::QuorumReadResponse(resp)) => {
-                self.handle_quorum_read_response(from, resp).await;
-            }
-            Incoming::ClusterMessage(from, ClusterMessage::MetricSync(sync)) => {
-                if let Some((to, reply)) = self.metrics_server.handle_metric_sync(from, sync) {
-                    self.network
-                        .send(Outgoing::ClusterMessage(
-                            to,
-                            ClusterMessage::MetricSync(reply),
-                        ))
-                        .await;
-                }
-            }
-            Incoming::ClusterMessage(from, ClusterMessage::ReadStrategyUpdate(strat)) => {
-                self.handle_read_strategy_update(from, strat);
+    fn handle_client_messages(&mut self, messages: &mut Vec<(ClientId, ClientMessage)>) -> bool {
+        let mut client_done = false;
+        for (from, message) in messages.drain(..) {
+            match message {
+                ClientMessage::Append(command_id, kv_command) => match &kv_command {
+                    KVCommand::Put(..) => {
+                        self.metrics_server.local_write();
+                        self.commit_command_to_log(from, command_id, kv_command);
+                    }
+                    KVCommand::Delete(_) => {
+                        self.metrics_server.local_write();
+                        self.commit_command_to_log(from, command_id, kv_command);
+                    }
+                    KVCommand::Get(_) => {
+                        self.metrics_server.local_read();
+                        self.handle_read_request(from, command_id, kv_command);
+                    }
+                },
+                ClientMessage::Done => client_done = true,
             }
         }
+        return client_done;
     }
 
-    async fn handle_client_request(&mut self, from: ClientId, request: ClientMessage) {
-        match request {
-            ClientMessage::Append(command_id, kv_command) => match &kv_command {
-                KVCommand::Put(..) => {
-                    self.metrics_server.local_write();
-                    self.commit_command_to_log(from, command_id, kv_command)
-                        .await;
+    fn handle_cluster_messages(&mut self, messages: &mut Vec<(NodeId, ClusterMessage)>) -> bool {
+        let mut server_done = false;
+        for (from, message) in messages.drain(..) {
+            match message {
+                ClusterMessage::OmniPaxosMessage(m) => {
+                    self.omnipaxos.handle_incoming(m);
+                    self.send_outgoing_msgs();
+                    self.handle_decided_entries();
                 }
-                KVCommand::Delete(_) => {
-                    self.metrics_server.local_write();
-                    self.commit_command_to_log(from, command_id, kv_command)
-                        .await;
+                ClusterMessage::QuorumReadRequest(req) => {
+                    self.handle_quorum_read_request(from, req)
                 }
-                KVCommand::Get(_) => {
-                    self.metrics_server.local_read();
-                    self.handle_read_request(from, command_id, kv_command).await;
+                ClusterMessage::QuorumReadResponse(resp) => {
+                    self.handle_quorum_read_response(from, resp);
                 }
-            },
-        };
+                ClusterMessage::MetricSync(sync) => {
+                    if let Some((to, reply)) = self.metrics_server.handle_metric_sync(from, sync) {
+                        let cluster_msg = ClusterMessage::MetricSync(reply);
+                        self.network.send_to_cluster(to, cluster_msg);
+                    }
+                }
+                ClusterMessage::ReadStrategyUpdate(strat) => {
+                    self.handle_read_strategy_update(from, strat);
+                }
+                ClusterMessage::Done => server_done = true,
+            }
+        }
+        // TODO: check if its go to delay the outgoing + decided
+        // if self.id == self.omnipaxos.get_current_leader().unwrap_or_default() {
+        //     self.handle_decided_entries();
+        // }
+        // self.send_outgoing_msgs();
+        server_done
     }
 
-    async fn handle_read_request(
+    fn handle_read_request(
         &mut self,
         from: ClientId,
         command_id: CommandId,
@@ -333,22 +368,13 @@ impl OmniPaxosServer {
     ) {
         let read_strat = self.strategy.read_strategies[self.id as usize - 1];
         match read_strat {
-            ReadStrategy::ReadAsWrite => {
-                self.commit_command_to_log(from, command_id, kv_command)
-                    .await
-            }
-            ReadStrategy::QuorumRead => {
-                self.start_quorum_read(from, command_id, kv_command, false)
-                    .await
-            }
-            ReadStrategy::BallotRead => {
-                self.start_quorum_read(from, command_id, kv_command, true)
-                    .await
-            }
+            ReadStrategy::ReadAsWrite => self.commit_command_to_log(from, command_id, kv_command),
+            ReadStrategy::QuorumRead => self.start_quorum_read(from, command_id, kv_command, false),
+            ReadStrategy::BallotRead => self.start_quorum_read(from, command_id, kv_command, true),
         }
     }
 
-    async fn commit_command_to_log(
+    fn commit_command_to_log(
         &mut self,
         from: ClientId,
         command_id: CommandId,
@@ -363,10 +389,10 @@ impl OmniPaxosServer {
         self.omnipaxos
             .append(command)
             .expect("Append to Omnipaxos log failed");
-        self.send_outgoing_msgs().await;
+        self.send_outgoing_msgs();
     }
 
-    async fn handle_quorum_read_request(&mut self, from: NodeId, request: QuorumReadRequest) {
+    fn handle_quorum_read_request(&mut self, from: NodeId, request: QuorumReadRequest) {
         let read_response = QuorumReadResponse::new(
             self.id,
             request.client_id,
@@ -378,24 +404,24 @@ impl OmniPaxosServer {
             self.omnipaxos.get_decided_idx(),
             self.omnipaxos.get_max_prom_acc_idx(),
         );
-        let response =
-            Outgoing::ClusterMessage(from, ClusterMessage::QuorumReadResponse(read_response));
-        self.network.send(response).await;
+        let cluster_msg = ClusterMessage::QuorumReadResponse(read_response);
+        self.network.send_to_cluster(from, cluster_msg);
     }
 
     // TODO: if reads show us that something is chosen but not decided we can decide it and
     // apply chosen writes and rinse reads immediately.
-    async fn handle_quorum_read_response(&mut self, from: NodeId, response: QuorumReadResponse) {
+    fn handle_quorum_read_response(&mut self, from: NodeId, response: QuorumReadResponse) {
         debug!("Got q response from {from}: {response:#?}");
         if let Some(ready_read) = self
             .quorum_reader
             .handle_response(response, self.current_decided_idx)
         {
-            self.update_database_and_respond(vec![ready_read]).await;
+            // TODO: remove allocation
+            self.update_database_and_respond(vec![ready_read]);
         }
     }
 
-    async fn start_quorum_read(
+    fn start_quorum_read(
         &mut self,
         client_id: ClientId,
         command_id: CommandId,
@@ -421,17 +447,14 @@ impl OmniPaxosServer {
                 client_id,
                 command_id,
             });
-            let msg = Outgoing::ClusterMessage(*peer, read_request);
-            self.network.send(msg).await;
+            self.network.send_to_cluster(*peer, read_request);
         }
     }
 
-    async fn send_strat(&mut self) {
+    fn send_strat(&mut self) {
         let msg = ClusterMessage::ReadStrategyUpdate(self.strategy.read_strategies.clone());
         for peer in self.omnipaxos.get_peers() {
-            self.network
-                .send(Outgoing::ClusterMessage(*peer, msg.clone()))
-                .await;
+            self.network.send_to_cluster(*peer, msg.clone());
         }
     }
 

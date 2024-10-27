@@ -1,15 +1,227 @@
 use auto_quorum::common::{
     kv::*,
     messages::*,
-    utils::{get_node_addr, wrap_stream, Connection as ServerConnection},
+    utils::{
+        frame_clients_connection, frame_registration_connection, get_node_addr,
+        FromServerConnection, ToServerConnection,
+    },
 };
 use chrono::Utc;
 use futures::{SinkExt, StreamExt};
-use rand::Rng;
+use log::*;
+use rand::{rngs::StdRng, Rng};
 use serde::{Deserialize, Serialize};
+use std::net::SocketAddr;
 use std::time::Duration;
-use tokio::net::TcpStream;
-use tokio::time::interval;
+use tokio::{net::TcpStream, select, sync::oneshot, time::interval};
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ClientConfig {
+    cluster_name: String,
+    location: String,
+    server_id: u64,
+    request_rate_intervals: Vec<RequestInterval>,
+    local_deployment: Option<bool>,
+    kill_signal_sec: Option<u64>,
+    pub scheduled_start_utc_ms: Option<i64>,
+}
+
+pub struct Client;
+const REQUEST_DATA_BUFFER_SIZE: usize = 8000;
+const INCOMING_MESSAGE_BUFFER_SIZE: usize = 100;
+const RETRY_INITIAL_CONNECTION_TIMEOUT: Duration = Duration::from_secs(1);
+
+impl Client {
+    pub async fn run(config: ClientConfig) {
+        // Get connection to server
+        let is_local = config.local_deployment.unwrap_or(false);
+        let server_address = get_node_addr(&config.cluster_name, config.server_id, is_local)
+            .expect("Couldn't resolve server IP");
+        let (mut from_server_conn, to_server_conn) =
+            Client::get_server_connection(server_address).await;
+        // Wait for server to be ready for requests
+        match from_server_conn.next().await {
+            Some(Ok(ServerMessage::Ready)) => (),
+            _ => panic!("Error waiting for handshake message"),
+        }
+        // Spawn reader and writer actors
+        let (total_requests_tx, total_requests_rx) = tokio::sync::oneshot::channel();
+        let reader_task = tokio::spawn(Self::reader_actor(from_server_conn, total_requests_rx));
+        let writer_task = tokio::spawn(Self::writer_actor(
+            to_server_conn,
+            total_requests_tx,
+            config.request_rate_intervals,
+        ));
+        // Collect request data and shutdown cluster
+        let (request_data, response_data) = tokio::join!(writer_task, reader_task);
+        let (request_data, mut server_writer) = request_data.expect("Error collecting requests");
+        server_writer.send(ClientMessage::Done).await.unwrap();
+        let response_data = response_data.expect("Error collecting responses");
+        Self::print_results(request_data, response_data);
+    }
+
+    async fn get_server_connection(
+        server_address: SocketAddr,
+    ) -> (FromServerConnection, ToServerConnection) {
+        let mut retry_connection = interval(RETRY_INITIAL_CONNECTION_TIMEOUT);
+        loop {
+            retry_connection.tick().await;
+            match TcpStream::connect(server_address).await {
+                Ok(stream) => {
+                    stream.set_nodelay(true).unwrap();
+                    let mut registration_connection = frame_registration_connection(stream);
+                    registration_connection
+                        .send(RegistrationMessage::ClientRegister)
+                        .await
+                        .expect("Couldn't send registration to server");
+                    let underlying_stream = registration_connection.into_inner().into_inner();
+                    break frame_clients_connection(underlying_stream);
+                }
+                Err(e) => error!("Unable to connect to server: {e}"),
+            }
+        }
+    }
+
+    async fn reader_actor(
+        from_server_conn: FromServerConnection,
+        mut total_responses_tx: oneshot::Receiver<usize>,
+    ) -> Vec<(CommandId, Response)> {
+        let mut response_data = Vec::with_capacity(REQUEST_DATA_BUFFER_SIZE);
+        let mut buf_reader = from_server_conn.ready_chunks(INCOMING_MESSAGE_BUFFER_SIZE);
+        // Collect responses and wait for number of responses to be established
+        let total_responses = loop {
+            select! {
+                Some(messages) = buf_reader.next() => Self::handle_response(&mut response_data, messages),
+                Ok(num_requests) = &mut total_responses_tx => break num_requests,
+            }
+        };
+        // Collect rest of responses
+        if response_data.len() < total_responses {
+            while let Some(messages) = buf_reader.next().await {
+                Client::handle_response(&mut response_data, messages);
+                if response_data.len() >= total_responses {
+                    break;
+                }
+            }
+        }
+        info!("Finished collecting {} responses", response_data.len());
+        return response_data;
+    }
+
+    #[inline]
+    fn handle_response(
+        response_data: &mut Vec<(CommandId, Response)>,
+        incoming_messages: Vec<Result<ServerMessage, std::io::Error>>,
+    ) {
+        for msg in incoming_messages {
+            match msg {
+                Ok(ServerMessage::Ready) => panic!("Recieved unexpected message: {msg:?}"),
+                Ok(server_response) => {
+                    let cmd_id = server_response.command_id();
+                    let response = Response {
+                        time_recieved_utc: Utc::now().timestamp_millis(),
+                        message: server_response,
+                    };
+                    response_data.push((cmd_id, response));
+                }
+                Err(err) => panic!("Error deserializing message: {err:?}"),
+            }
+        }
+    }
+
+    async fn writer_actor(
+        mut to_server_conn: ToServerConnection,
+        total_requests_tx: oneshot::Sender<usize>,
+        intervals: Vec<RequestInterval>,
+    ) -> (Vec<RequestData>, ToServerConnection) {
+        let mut request_data = Vec::with_capacity(REQUEST_DATA_BUFFER_SIZE);
+        if intervals.is_empty() {
+            // No intervals, nothing to send
+            if let Err(_) = total_requests_tx.send(0) {
+                error!("Failed to notify reader of total number of requests.")
+            }
+            return (request_data, to_server_conn);
+        }
+
+        let mut request_id = 0;
+        let mut rng: StdRng = rand::SeedableRng::from_entropy();
+        let mut intervals = intervals.iter();
+
+        // Initialize first interval settings
+        let first_interval = intervals.next().unwrap();
+        let mut read_ratio = first_interval.read_ratio;
+        let mut request_interval = interval(first_interval.get_request_delay());
+        let mut next_interval = interval(first_interval.get_interval_duration());
+        let _ = next_interval.tick().await;
+
+        // Actor event loop
+        loop {
+            select! {
+                _ = request_interval.tick() => {
+                    if let Some(data) = Self::send_request(&mut to_server_conn, &mut rng, request_id, read_ratio).await {
+                        request_data.push(data);
+                        request_id += 1;
+                    }
+                },
+                _ = next_interval.tick() => {
+                    match intervals.next() {
+                        Some(new_interval) => {
+                            read_ratio = new_interval.read_ratio;
+                            next_interval = interval(new_interval.get_interval_duration());
+                            next_interval.tick().await;
+                            request_interval = interval(new_interval.get_request_delay());
+                        },
+                        None => break,
+                    }
+                },
+            }
+        }
+        info!("Finished sending {} requests", request_data.len());
+        if let Err(_) = total_requests_tx.send(request_data.len()) {
+            error!("Failed to notify reader of total number of requests.")
+        }
+        return (request_data, to_server_conn);
+    }
+
+    #[inline]
+    async fn send_request(
+        to_server_conn: &mut ToServerConnection,
+        rng: &mut StdRng,
+        request_id: usize,
+        read_ratio: f64,
+    ) -> Option<RequestData> {
+        let key = request_id.to_string();
+        let cmd = if rng.gen::<f64>() < read_ratio {
+            KVCommand::Get(key)
+        } else {
+            KVCommand::Put(key.clone(), key)
+        };
+        let request = ClientMessage::Append(request_id, cmd);
+        match to_server_conn.send(request).await {
+            Ok(_) => Some(RequestData {
+                time_sent_utc: Utc::now().timestamp_millis(),
+                response: None,
+            }),
+            Err(e) => {
+                error!("Couldn't send command to server: {e}");
+                None
+            }
+        }
+    }
+
+    fn print_results(
+        mut request_data: Vec<RequestData>,
+        response_data: Vec<(CommandId, Response)>,
+    ) {
+        for (command_id, response) in response_data {
+            request_data[command_id].response = Some(response);
+        }
+        for request_data in &request_data {
+            let request_json = serde_json::to_string(request_data).unwrap();
+            println!("{request_json}");
+        }
+    }
+}
 
 #[derive(Debug, Serialize)]
 struct RequestData {
@@ -21,16 +233,6 @@ struct RequestData {
 struct Response {
     time_recieved_utc: i64,
     message: ServerMessage,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct ClientConfig {
-    location: String,
-    server_id: u64,
-    request_rate_intervals: Vec<RequestInterval>,
-    local_deployment: Option<bool>,
-    kill_signal_sec: Option<u64>,
-    pub scheduled_start_utc_ms: Option<i64>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Copy)]
@@ -52,166 +254,5 @@ impl RequestInterval {
         let delay_ms = 1000 / self.requests_per_sec;
         assert!(delay_ms != 0);
         Duration::from_millis(delay_ms)
-    }
-}
-
-pub struct Client {
-    server: ServerConnection,
-    command_id: CommandId,
-    request_data: Vec<RequestData>,
-    request_rate_intervals: Vec<RequestInterval>,
-    kill_signal_sec: Option<u64>,
-}
-
-impl Client {
-    pub async fn with(config: ClientConfig) -> Self {
-        let is_local = config.local_deployment.unwrap_or(false);
-        let server_address =
-            get_node_addr(config.server_id, is_local).expect("Couldn't resolve server IP");
-        let server_stream = TcpStream::connect(server_address)
-            .await
-            .expect("Couldn't connect to server {server_id}");
-        server_stream.set_nodelay(true).unwrap();
-        let mut client = Self {
-            server: wrap_stream(server_stream),
-            command_id: 0,
-            request_data: Vec::with_capacity(8000),
-            request_rate_intervals: config.request_rate_intervals,
-            kill_signal_sec: config.kill_signal_sec,
-        };
-        client.send_registration().await;
-        client
-    }
-
-    pub async fn put(&mut self, key: String, value: String) {
-        self.send_command(KVCommand::Put(key, value)).await;
-    }
-
-    pub async fn delete(&mut self, key: String) {
-        self.send_command(KVCommand::Delete(key)).await;
-    }
-
-    pub async fn get(&mut self, key: String) {
-        self.send_command(KVCommand::Get(key)).await;
-    }
-
-    pub async fn run(&mut self) {
-        if self.request_rate_intervals.is_empty() {
-            return;
-        }
-        let mut rng = rand::thread_rng();
-        let intervals = self.request_rate_intervals.clone();
-        let mut intervals = intervals.iter();
-        let first_interval = intervals.next().unwrap();
-        let mut read_ratio = first_interval.read_ratio;
-        let mut request_interval = interval(first_interval.get_request_delay());
-        let mut next_interval = interval(first_interval.get_interval_duration());
-        let mut kill_interval = match self.kill_signal_sec {
-            Some(0) => interval(Duration::from_millis(1)),
-            Some(sec_until_kill) => interval(Duration::from_secs(sec_until_kill)),
-            None => interval(Duration::from_secs(999999)),
-        };
-        request_interval.tick().await;
-        next_interval.tick().await;
-        kill_interval.tick().await;
-
-        loop {
-            tokio::select! {
-                biased;
-                // Handle the next server message when it arrives
-                Some(msg) = self.server.next() => self.handle_response(msg.unwrap()),
-                // Send request according to rate of current request interval setting. (defined in
-                    // TOML config)
-                _ = request_interval.tick() => {
-                    let key = self.command_id.to_string();
-                    if rng.gen::<f64>() < read_ratio {
-                        self.get(key).await;
-                    } else {
-                        self.put(key.clone(), key).await;
-                    }
-                },
-                // Go to the next request interval setting. (defined in TOML config)
-                _ = next_interval.tick() => {
-                    if let Some(new_interval) = intervals.next() {
-                        read_ratio = new_interval.read_ratio;
-                        next_interval = interval(new_interval.get_interval_duration());
-                        next_interval.tick().await;
-                        request_interval = interval(new_interval.get_request_delay());
-                    } else {
-                        break;
-                    }
-                },
-                // Hardcoded for a specific benchmark. Tells current server to "crash" and then
-                    // connects to server 6.
-                _ = kill_interval.tick(), if self.kill_signal_sec.is_some() => {
-                    self.send_kill_signal().await;
-                    self.kill_signal_sec = None;
-                    // Makes sure kill_internal.tick() never resolves again
-                    kill_interval = interval(Duration::from_secs(999999));
-                    kill_interval.tick().await;
-                    let server_address =
-                        get_node_addr(6, false).expect("Couldn't resolve server IP");
-                    let server_stream = TcpStream::connect(server_address)
-                        .await
-                        .expect("Couldn't connect to server {server_id}");
-                    server_stream.set_nodelay(true).unwrap();
-                    self.server = wrap_stream(server_stream);
-                    self.send_registration().await;
-                }
-            }
-        }
-        self.print_results();
-    }
-
-    async fn send_command(&mut self, command: KVCommand) {
-        let request = ClientMessage::Append(self.command_id, command);
-        let data = RequestData {
-            time_sent_utc: Utc::now().timestamp_millis(),
-            response: None,
-        };
-        self.request_data.push(data);
-        self.command_id += 1;
-        if let Err(e) = self
-            .server
-            .send(NetworkMessage::ClientMessage(request))
-            .await
-        {
-            log::error!("Couldn't send command to server: {e}");
-        }
-    }
-
-    fn handle_response(&mut self, msg: NetworkMessage) {
-        match msg {
-            NetworkMessage::ServerMessage(response) => {
-                let cmd_id = response.command_id();
-                let response_time = Utc::now().timestamp_millis();
-                self.request_data[cmd_id].response = Some(Response {
-                    time_recieved_utc: response_time,
-                    message: response,
-                });
-            }
-            _ => panic!("Recieved unexpected message: {msg:?}"),
-        }
-    }
-
-    async fn send_registration(&mut self) {
-        self.server
-            .send(NetworkMessage::ClientRegister)
-            .await
-            .expect("Couldn't send message to server");
-    }
-
-    async fn send_kill_signal(&mut self) {
-        self.server
-            .send(NetworkMessage::KillServer)
-            .await
-            .expect("Couldn't send message to server")
-    }
-
-    fn print_results(&self) {
-        for request_data in &self.request_data {
-            let request_json = serde_json::to_string(request_data).unwrap();
-            println!("{request_json}");
-        }
     }
 }
