@@ -5,7 +5,10 @@ pub mod messages {
     };
     use serde::{Deserialize, Serialize};
 
-    use super::kv::{ClientId, Command, CommandId, KVCommand};
+    use super::{
+        kv::{ClientId, Command, CommandId, KVCommand},
+        utils::Timestamp,
+    };
 
     #[derive(Clone, Debug, Serialize, Deserialize)]
     pub enum RegistrationMessage {
@@ -20,6 +23,7 @@ pub mod messages {
         QuorumReadResponse(QuorumReadResponse),
         MetricSync(MetricSync),
         ReadStrategyUpdate(Vec<ReadStrategy>),
+        LeaderStartSignal(Timestamp),
         Done,
     }
 
@@ -33,7 +37,7 @@ pub mod messages {
     pub enum ServerMessage {
         Write(CommandId),
         Read(CommandId, Option<String>),
-        Ready,
+        StartSignal(Timestamp),
     }
 
     impl ServerMessage {
@@ -41,7 +45,7 @@ pub mod messages {
             match self {
                 ServerMessage::Write(id) => *id,
                 ServerMessage::Read(id, _) => *id,
-                ServerMessage::Ready => unimplemented!(),
+                ServerMessage::StartSignal(_) => unimplemented!(),
             }
         }
     }
@@ -212,6 +216,8 @@ pub mod utils {
     use tokio::net::TcpStream;
     use tokio_serde::{formats::Bincode, Framed};
     use tokio_util::codec::{Framed as CodecFramed, FramedRead, FramedWrite, LengthDelimitedCodec};
+
+    pub type Timestamp = i64;
 
     pub fn get_node_addr(
         cluster_name: &String,

@@ -23,7 +23,6 @@ pub struct ClientConfig {
     request_rate_intervals: Vec<RequestInterval>,
     local_deployment: Option<bool>,
     kill_signal_sec: Option<u64>,
-    pub scheduled_start_utc_ms: Option<i64>,
 }
 
 pub struct Client;
@@ -39,12 +38,16 @@ impl Client {
             .expect("Couldn't resolve server IP");
         let (mut from_server_conn, to_server_conn) =
             Client::get_server_connection(server_address).await;
-        // Wait for server to be ready for requests
+        // Wait for server to signal start
+        info!("Waiting for start signal from server");
         match from_server_conn.next().await {
-            Some(Ok(ServerMessage::Ready)) => (),
+            Some(Ok(ServerMessage::StartSignal(start_time))) => {
+                Self::wait_until_sync_time(start_time).await;
+            }
             _ => panic!("Error waiting for handshake message"),
         }
         // Spawn reader and writer actors
+        info!("Starting requests");
         let (total_requests_tx, total_requests_rx) = tokio::sync::oneshot::channel();
         let reader_task = tokio::spawn(Self::reader_actor(from_server_conn, total_requests_rx));
         let writer_task = tokio::spawn(Self::writer_actor(
@@ -57,6 +60,10 @@ impl Client {
         let (request_data, mut server_writer) = request_data.expect("Error collecting requests");
         server_writer.send(ClientMessage::Done).await.unwrap();
         let response_data = response_data.expect("Error collecting responses");
+        info!(
+            "Client finished: collected {} responses",
+            response_data.len()
+        );
         Self::print_results(request_data, response_data);
     }
 
@@ -79,6 +86,20 @@ impl Client {
                 }
                 Err(e) => error!("Unable to connect to server: {e}"),
             }
+        }
+    }
+
+    // Wait until the scheduled start time to synchronize client starts.
+    // If start time has already passed, start immediately.
+    async fn wait_until_sync_time(scheduled_start_utc_ms: i64) {
+        let now = Utc::now();
+        let milliseconds_until_sync = scheduled_start_utc_ms - now.timestamp_millis();
+        println!("{{ \"sync_delay\": {milliseconds_until_sync} }}");
+        // let sync_time = Utc::now() + chrono::Duration::milliseconds(milliseconds_until_sync);
+        if milliseconds_until_sync > 0 {
+            tokio::time::sleep(Duration::from_millis(milliseconds_until_sync as u64)).await;
+        } else {
+            warn!("Started after synchronization point!");
         }
     }
 
@@ -115,7 +136,7 @@ impl Client {
     ) {
         for msg in incoming_messages {
             match msg {
-                Ok(ServerMessage::Ready) => panic!("Recieved unexpected message: {msg:?}"),
+                Ok(ServerMessage::StartSignal(_)) => panic!("Recieved unexpected message: {msg:?}"),
                 Ok(server_response) => {
                     let cmd_id = server_response.command_id();
                     let response = Response {

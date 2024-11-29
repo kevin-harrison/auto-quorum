@@ -3,7 +3,6 @@ location = "local-3"
 server_id = 3
 read_ratio = 0.25
 local_deployment = true
-scheduled_start_utc_ms = SCHEDULE
 
 [[request_rate_intervals]]
 duration_sec = 5

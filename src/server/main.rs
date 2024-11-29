@@ -1,9 +1,9 @@
-use crate::server::{OmniPaxosServer, OmniPaxosServerConfig};
+use crate::{configs::AutoQuorumServerConfig, server::OmniPaxosServer};
 use env_logger;
-use omnipaxos::OmniPaxosConfig;
 use std::{env, fs};
 use toml;
 
+mod configs;
 mod database;
 mod metrics;
 mod network;
@@ -18,11 +18,9 @@ pub async fn main() {
         Ok(file_path) => file_path,
         Err(_) => panic!("Requires CONFIG_FILE environment variable"),
     };
-    let omnipaxos_config = OmniPaxosConfig::with_toml(&config_file).unwrap();
     let config_string = fs::read_to_string(config_file).unwrap();
-    let server_config: OmniPaxosServerConfig = toml::from_str(&config_string).unwrap();
-    let initial_leader = server_config.initial_leader;
+    let server_config: AutoQuorumServerConfig = toml::from_str(&config_string).unwrap();
     println!("{}", serde_json::to_string(&server_config).unwrap());
-    let mut server = OmniPaxosServer::new(server_config, omnipaxos_config).await;
-    server.run(initial_leader).await;
+    let mut server = OmniPaxosServer::new(server_config).await;
+    server.run().await;
 }

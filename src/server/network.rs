@@ -9,9 +9,13 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::mpsc;
 use tokio::sync::mpsc::{Sender, UnboundedSender};
+use tokio::{
+    net::{TcpListener, TcpStream},
+    sync::mpsc::Receiver,
+};
+use tokio::{sync::mpsc, task::JoinHandle};
+use tokio_util::sync::CancellationToken;
 
 pub struct Network {
     cluster_name: String,
@@ -21,32 +25,42 @@ pub struct Network {
     peer_connections: Vec<Option<PeerConnection>>,
     client_connections: HashMap<ClientId, ClientConnection>,
     max_client_id: Arc<Mutex<ClientId>>,
+    batch_size: usize,
     client_message_sender: Sender<(ClientId, ClientMessage)>,
     cluster_message_sender: Sender<(NodeId, ClusterMessage)>,
+    pub cluster_messages: Receiver<(NodeId, ClusterMessage)>,
+    pub client_messages: Receiver<(ClientId, ClientMessage)>,
+    cancel_token: CancellationToken,
 }
 
 impl Network {
     pub async fn new(
         cluster_name: String,
         id: NodeId,
-        peers: Vec<NodeId>,
+        nodes: Vec<NodeId>,
         num_clients: usize,
         local_deployment: bool,
-        client_message_sender: Sender<(ClientId, ClientMessage)>,
-        cluster_message_sender: Sender<(NodeId, ClusterMessage)>,
+        batch_size: usize,
     ) -> Self {
+        let peers: Vec<u64> = nodes.iter().cloned().filter(|node| *node != id).collect();
         let mut cluster_connections = vec![];
         cluster_connections.resize_with(peers.len(), Default::default);
+        let (cluster_message_sender, cluster_messages) = tokio::sync::mpsc::channel(batch_size);
+        let (client_message_sender, client_messages) = tokio::sync::mpsc::channel(batch_size);
         let mut network = Self {
             cluster_name,
+            is_local: local_deployment,
             id,
             peers,
             peer_connections: cluster_connections,
             client_connections: HashMap::new(),
             max_client_id: Arc::new(Mutex::new(0)),
+            batch_size,
             client_message_sender,
             cluster_message_sender,
-            is_local: local_deployment,
+            cluster_messages,
+            client_messages,
+            cancel_token: CancellationToken::new(),
         };
         network.initialize_connections(num_clients).await;
         network
@@ -86,6 +100,8 @@ impl Network {
         let client_sender = self.client_message_sender.clone();
         let cluster_sender = self.cluster_message_sender.clone();
         let max_client_id_handle = self.max_client_id.clone();
+        let batch_size = self.batch_size;
+        let cancel_token = self.cancel_token.clone();
         tokio::spawn(async move {
             let listener = TcpListener::bind(listening_address).await.unwrap();
             loop {
@@ -99,6 +115,8 @@ impl Network {
                             cluster_sender.clone(),
                             connection_sender.clone(),
                             max_client_id_handle.clone(),
+                            batch_size,
+                            cancel_token.clone(),
                         ));
                     }
                     Err(e) => error!("Error listening for new connection: {:?}", e),
@@ -113,6 +131,8 @@ impl Network {
         cluster_message_sender: Sender<(NodeId, ClusterMessage)>,
         connection_sender: Sender<NewConnection>,
         max_client_id_handle: Arc<Mutex<ClientId>>,
+        batch_size: usize,
+        cancel_token: CancellationToken,
     ) {
         // Identify connector's ID and type by handshake
         let mut registration_connection = frame_registration_connection(connection);
@@ -124,7 +144,9 @@ impl Network {
                 NewConnection::ToPeer(PeerConnection::new(
                     node_id,
                     underlying_stream,
+                    batch_size,
                     cluster_message_sender,
+                    cancel_token,
                 ))
             }
             Some(Ok(RegistrationMessage::ClientRegister)) => {
@@ -133,11 +155,12 @@ impl Network {
                     *max_client_id += 1;
                     *max_client_id
                 };
-                debug!("Identified connection from client {next_client_id}");
+                info!("Identified connection from client {next_client_id}");
                 let underlying_stream = registration_connection.into_inner().into_inner();
                 NewConnection::ToClient(ClientConnection::new(
                     next_client_id,
                     underlying_stream,
+                    batch_size,
                     client_message_sender,
                 ))
             }
@@ -158,8 +181,6 @@ impl Network {
         let peers_to_contact: Vec<NodeId> =
             self.peers.iter().cloned().filter(|&p| p > my_id).collect();
         for peer in peers_to_contact {
-            let cluster_sender = self.cluster_message_sender.clone();
-            let connection_sender = connection_sender.clone();
             let to_address = match get_node_addr(&self.cluster_name, peer, self.is_local) {
                 Ok(addr) => addr,
                 Err(e) => {
@@ -169,6 +190,10 @@ impl Network {
             };
             let reconnect_delay = Duration::from_secs(1);
             let mut reconnect_interval = tokio::time::interval(reconnect_delay);
+            let cluster_sender = self.cluster_message_sender.clone();
+            let connection_sender = connection_sender.clone();
+            let batch_size = self.batch_size;
+            let cancel_token = self.cancel_token.clone();
             tokio::spawn(async move {
                 // Establish connection
                 let peer_connection = loop {
@@ -193,29 +218,56 @@ impl Network {
                 }
                 let underlying_stream = registration_connection.into_inner().into_inner();
                 // Create connection actor
-                let peer_actor = PeerConnection::new(peer, underlying_stream, cluster_sender);
+                let peer_actor = PeerConnection::new(
+                    peer,
+                    underlying_stream,
+                    batch_size,
+                    cluster_sender,
+                    cancel_token,
+                );
                 let new_connection = NewConnection::ToPeer(peer_actor);
                 connection_sender.send(new_connection).await.unwrap();
             });
         }
     }
 
-    // TODO: remove connection if it closes
     pub fn send_to_cluster(&mut self, to: NodeId, msg: ClusterMessage) {
         match self.cluster_id_to_idx(to) {
             Some(idx) => match &mut self.peer_connections[idx] {
-                Some(ref mut connection) => connection.send(msg),
+                Some(ref mut connection) => {
+                    if let Err(err) = connection.send(msg) {
+                        warn!("Couldn't send msg to peer {to}: {err}");
+                        self.peer_connections[idx] = None;
+                    }
+                }
                 None => warn!("Not connected to node {to}: couldn't send {msg:?}"),
             },
             None => error!("Sending to unexpected node {to}"),
         }
     }
 
-    // TODO: remove connection if it closes
     pub fn send_to_client(&mut self, to: ClientId, msg: ServerMessage) {
         match self.client_connections.get_mut(&to) {
-            Some(connection) => connection.send(msg),
+            Some(connection) => {
+                if let Err(err) = connection.send(msg) {
+                    warn!("Couldn't send msg to client {to}: {err}");
+                    self.client_connections.remove(&to);
+                }
+            }
             None => warn!("Not connected to client {to}"),
+        }
+    }
+
+    // Removes all peer connections, but waits for queued writes to the peers to finish first
+    pub async fn shutdown(&mut self) {
+        self.cancel_token.cancel();
+        for peer_connection in self.peer_connections.drain(..) {
+            if let Some(connection) = peer_connection {
+                connection.wait_for_writes_and_shutdown().await;
+            }
+        }
+        for _ in 0..self.peers.len() {
+            self.peer_connections.push(None);
         }
     }
 
@@ -232,6 +284,7 @@ enum NewConnection {
 
 struct PeerConnection {
     peer_id: NodeId,
+    writer_task: JoinHandle<()>,
     outgoing_messages: UnboundedSender<ClusterMessage>,
 }
 
@@ -239,12 +292,14 @@ impl PeerConnection {
     pub fn new(
         peer_id: NodeId,
         connection: TcpStream,
+        batch_size: usize,
         incoming_messages: Sender<(NodeId, ClusterMessage)>,
+        cancel_token: CancellationToken,
     ) -> Self {
         let (reader, mut writer) = frame_cluster_connection(connection);
         // Reader Actor
         let _reader_task = tokio::spawn(async move {
-            let mut buf_reader = reader.ready_chunks(100);
+            let mut buf_reader = reader.ready_chunks(batch_size);
             while let Some(messages) = buf_reader.next().await {
                 for msg in messages {
                     match msg {
@@ -263,28 +318,52 @@ impl PeerConnection {
         });
         // Writer Actor
         let (message_tx, mut message_rx) = mpsc::unbounded_channel();
-        let _writer_task = tokio::spawn(async move {
-            let mut buffer = Vec::with_capacity(100);
-            while message_rx.recv_many(&mut buffer, 100).await != 0 {
-                for msg in buffer.drain(..) {
-                    if let Err(err) = writer.feed(msg).await {
-                        warn!("Couldn't send message to node {peer_id}: {err}");
-                        error!("Cant Remove connection to node {peer_id}");
+        let writer_task = tokio::spawn(async move {
+            let mut buffer = Vec::with_capacity(batch_size);
+            loop {
+                tokio::select! {
+                    biased;
+                    num_messages = message_rx.recv_many(&mut buffer, batch_size) => {
+                        if num_messages == 0 { break; }
+                        for msg in buffer.drain(..) {
+                            if let Err(err) = writer.feed(msg).await {
+                                error!("Couldn't send message to node {peer_id}: {err}");
+                                break;
+                            }
+                        }
+                        if let Err(err) = writer.flush().await {
+                            error!("Couldn't send message to node {peer_id}: {err}");
+                            break;
+                        }
+                    },
+                    _ = cancel_token.cancelled() => {
+                        // Try to empty outgoing message queue before exiting
+                        while let Ok(msg) = message_rx.try_recv() {
+                            let _ = writer.feed(msg).await;
+                        }
+                        let _ = writer.flush().await;
+                        break;
                     }
                 }
-                writer.flush().await.unwrap();
             }
+            info!("Connection to node {peer_id} closed");
         });
         PeerConnection {
             peer_id,
+            writer_task,
             outgoing_messages: message_tx,
         }
     }
 
-    pub fn send(&mut self, msg: ClusterMessage) {
-        self.outgoing_messages
-            .send(msg)
-            .expect("Tried to send on a closed channel");
+    pub fn send(
+        &mut self,
+        msg: ClusterMessage,
+    ) -> Result<(), mpsc::error::SendError<ClusterMessage>> {
+        self.outgoing_messages.send(msg)
+    }
+
+    async fn wait_for_writes_and_shutdown(self) {
+        let _ = self.writer_task.await;
     }
 }
 
@@ -297,12 +376,13 @@ impl ClientConnection {
     pub fn new(
         client_id: ClientId,
         connection: TcpStream,
+        batch_size: usize,
         incoming_messages: Sender<(ClientId, ClientMessage)>,
     ) -> Self {
         let (reader, mut writer) = frame_servers_connection(connection);
         // Reader Actor
         let _reader_task = tokio::spawn(async move {
-            let mut buf_reader = reader.ready_chunks(100);
+            let mut buf_reader = reader.ready_chunks(batch_size);
             while let Some(messages) = buf_reader.next().await {
                 for msg in messages {
                     match msg {
@@ -315,15 +395,20 @@ impl ClientConnection {
         // Writer Actor
         let (message_tx, mut message_rx) = mpsc::unbounded_channel();
         let _writer_task = tokio::spawn(async move {
-            let mut buffer = Vec::with_capacity(100);
-            while message_rx.recv_many(&mut buffer, 100).await != 0 {
+            let mut buffer = Vec::with_capacity(batch_size);
+            while message_rx.recv_many(&mut buffer, batch_size).await != 0 {
                 for msg in buffer.drain(..) {
                     if let Err(err) = writer.feed(msg).await {
-                        warn!("Couldn't send message to client {client_id}: {err}");
-                        error!("Cant Remove connection to client {client_id}");
+                        error!("Couldn't send message to client {client_id}: {err}");
+                        error!("Killing connection to client {client_id}");
+                        return;
                     }
                 }
-                writer.flush().await.unwrap();
+                if let Err(err) = writer.flush().await {
+                    error!("Couldn't send message to client {client_id}: {err}");
+                    error!("Killing connection to client {client_id}");
+                    return;
+                }
             }
         });
         ClientConnection {
@@ -332,9 +417,10 @@ impl ClientConnection {
         }
     }
 
-    pub fn send(&mut self, msg: ServerMessage) {
-        self.outgoing_messages
-            .send(msg)
-            .expect("Tried to send on a closed channel");
+    pub fn send(
+        &mut self,
+        msg: ServerMessage,
+    ) -> Result<(), mpsc::error::SendError<ServerMessage>> {
+        self.outgoing_messages.send(msg)
     }
 }

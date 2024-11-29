@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -eux
+set -eu
 
 GREEN="\033[0;32m"
 NO_COLOR="\033[0m"

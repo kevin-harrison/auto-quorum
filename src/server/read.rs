@@ -1,3 +1,4 @@
+use log::debug;
 use omnipaxos::{ballot_leader_election::Ballot, storage::ReadQuorumConfig, util::NodeId};
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
@@ -178,7 +179,7 @@ impl QuorumReader {
                         id,
                         kv_cmd: ready_read.read_command,
                     };
-                    log::debug!("Rinsing {read_command:?}, rinse_idx = {idx}");
+                    debug!("Rinsing {read_command:?}, rinse_idx = {idx}");
                     return Some(read_command);
                 }
                 _ => return None,
@@ -199,7 +200,7 @@ impl QuorumReader {
                         // TODO: remove clone by getting drain_filter to work
                         kv_cmd: v.read_command.clone(),
                     };
-                    log::debug!("Rinsing {read_command:?}, rinse_idx = {idx}");
+                    debug!("Rinsing {read_command:?}, rinse_idx = {idx}");
                     ready_reads.push(read_command);
                     false
                 }

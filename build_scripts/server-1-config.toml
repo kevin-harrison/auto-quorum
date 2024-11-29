@@ -1,18 +1,12 @@
-cluster_name = "local-cluster"
 location = "local-1"
-initial_leader = 1
+server_id = 1
+num_clients = 1
+# Cluster-wide settings
 local_deployment = true
-optimize = OPTIMIZE
+cluster_name = "local-cluster"
+nodes = [1, 2, 3]
+initial_leader = 1
+initial_flexible_quorum = { read_quorum_size = 2, write_quorum_size = 2 }
+optimize = true
 optimize_threshold = 0.97
 initial_read_strat = ["ReadAsWrite", "ReadAsWrite", "ReadAsWrite"]
-
-[cluster_config]
-configuration_id = 1
-nodes = [1, 2, 3]
-flexible_quorum = { read_quorum_size = 2, write_quorum_size = 2 }
-
-[server_config]
-pid = 1
-election_tick_timeout = 1
-resend_message_tick_timeout = 5
-flush_batch_tick_timeout = 200
