@@ -10,6 +10,7 @@ pub struct AutoQuorumServerConfig {
     pub location: String,
     pub server_id: NodeId,
     pub num_clients: usize,
+    pub output_filepath: String,
     // Cluster-wide settings
     pub local_deployment: Option<bool>,
     pub cluster_name: String,

@@ -10,8 +10,7 @@ trap "interrupt" SIGINT
 
 for ((i = 1; i <= cluster_size; i++)); do
     config_path="./server-${i}-config.toml"
-    log_path="../../auto-quorum-benchmark/logs/test-local_server-${i}.log"
-    RUST_LOG=debug CONFIG_FILE="$config_path" cargo run --release --manifest-path="../Cargo.toml" --bin server 1> "$log_path" &
+    RUST_LOG=debug CONFIG_FILE="$config_path" cargo run --release --manifest-path="../Cargo.toml" --bin server &
 done
 wait
 

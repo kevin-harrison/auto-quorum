@@ -19,8 +19,10 @@ pub async fn main() {
         Err(_) => panic!("Requires CONFIG_FILE environment variable"),
     };
     let config_string = fs::read_to_string(config_file).unwrap();
-    let server_config: AutoQuorumServerConfig = toml::from_str(&config_string).unwrap();
-    println!("{}", serde_json::to_string(&server_config).unwrap());
+    let server_config: AutoQuorumServerConfig = match toml::from_str(&config_string) {
+        Ok(parsed_config) => parsed_config,
+        Err(e) => panic!("{e}"),
+    };
     let mut server = OmniPaxosServer::new(server_config).await;
     server.run().await;
 }

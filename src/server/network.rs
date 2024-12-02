@@ -240,7 +240,7 @@ impl Network {
                         self.peer_connections[idx] = None;
                     }
                 }
-                None => warn!("Not connected to node {to}: couldn't send {msg:?}"),
+                None => warn!("Not connected to node {to}"),
             },
             None => error!("Sending to unexpected node {to}"),
         }

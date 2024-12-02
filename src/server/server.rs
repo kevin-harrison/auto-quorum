@@ -1,9 +1,9 @@
 use crate::{
     configs::AutoQuorumServerConfig,
     database::Database,
-    metrics::MetricsHeartbeatServer,
+    metrics::{ClusterMetrics, MetricsHeartbeatServer},
     network::Network,
-    optimizer::{ClusterOptimizer, ClusterStrategy},
+    optimizer::{ClusterOptimizer, ClusterStrategy, NodeStrategy},
     read::QuorumReader,
 };
 use auto_quorum::common::{kv::*, messages::*, utils::Timestamp};
@@ -14,7 +14,8 @@ use omnipaxos::{
     ClusterConfig, OmniPaxos, OmniPaxosConfig,
 };
 use omnipaxos_storage::memory_storage::MemoryStorage;
-use std::time::Duration;
+use serde::Serialize;
+use std::{fs::File, io::Write, time::Duration};
 use tokio::time::interval;
 
 type OmniPaxosInstance = OmniPaxos<Command, MemoryStorage<Command>>;
@@ -35,6 +36,8 @@ pub struct OmniPaxosServer {
     optimize: bool,
     optimize_threshold: f64,
     experiment_state: ExperimentState,
+    output_file: File,
+    first_log_entry: bool,
     config: AutoQuorumServerConfig,
 }
 
@@ -55,6 +58,7 @@ impl OmniPaxosServer {
             NETWORK_BATCH_SIZE,
         )
         .await;
+        let output_file = File::create(config.output_filepath.clone()).unwrap();
         let mut server = OmniPaxosServer {
             id: config.server_id,
             database: Database::new(),
@@ -68,6 +72,8 @@ impl OmniPaxosServer {
             optimize: config.optimize.unwrap_or(true),
             optimize_threshold: config.optimize_threshold.unwrap_or(0.8),
             experiment_state: ExperimentState::initial_state(config.clone()),
+            output_file,
+            first_log_entry: true,
             config,
         };
         // Clears outgoing_messages of initial BLE messages
@@ -76,6 +82,7 @@ impl OmniPaxosServer {
     }
 
     pub async fn run(&mut self) {
+        self.start_log();
         if self.config.num_clients == 0 {
             self.experiment_state.node_finished(self.id);
             for peer in self.omnipaxos.get_peers() {
@@ -114,11 +121,12 @@ impl OmniPaxosServer {
                     self.handle_client_messages(&mut client_msg_buf).await;
                 },
             }
-            if self.experiment_state.is_finished() {
+            if self.experiment_state.is_finished() || self.experiment_state.is_killed(self.id) {
                 self.network.shutdown().await;
                 break;
             }
         }
+        self.end_log();
     }
 
     // Ensures cluster is connected and leader is promoted before returning.
@@ -163,7 +171,10 @@ impl OmniPaxosServer {
 
     fn handle_optimize_timeout(&mut self) {
         if !self.optimize {
-            self.log(None, false, false);
+            if self.first_log_entry {
+                // dummy log entry to create column names in pandas
+                self.log(false, 0.0, &self.strategy.clone(), 0.0, false)
+            }
             return;
         }
         self.update_current_strategy();
@@ -179,23 +190,17 @@ impl OmniPaxosServer {
         let curr_strat_latency = self.optimizer.score_strategy(curr_workload, &self.strategy);
         let (optimal_strategy, optimal_strat_latency) =
             self.optimizer.calculate_optimal_strategy(curr_workload);
-        if leader == self.id {
-            if self.reconfigure_threshold(optimal_strat_latency, curr_strat_latency) {
-                self.log(
-                    Some((&optimal_strategy, optimal_strat_latency, curr_strat_latency)),
-                    true,
-                    cache_update,
-                );
-                self.reconfigure_strategy(optimal_strategy);
-            } else {
-                self.log(
-                    Some((&self.strategy, optimal_strat_latency, curr_strat_latency)),
-                    false,
-                    cache_update,
-                );
-            }
-        } else {
-            self.log(None, false, cache_update)
+        let do_reconfigure = leader == self.id
+            && self.reconfigure_threshold(optimal_strat_latency, curr_strat_latency);
+        self.log(
+            do_reconfigure,
+            curr_strat_latency,
+            &optimal_strategy,
+            optimal_strat_latency,
+            cache_update,
+        );
+        if do_reconfigure {
+            self.reconfigure_strategy(optimal_strategy);
         }
     }
 
@@ -300,6 +305,7 @@ impl OmniPaxosServer {
                     }
                 },
                 ClientMessage::Done => self.handle_client_done(from).await,
+                ClientMessage::Kill => self.handle_client_kill(from).await,
             }
         }
     }
@@ -472,33 +478,66 @@ impl OmniPaxosServer {
         }
     }
 
+    async fn handle_client_kill(&mut self, client_id: ClientId) {
+        info!("{}: Received kill signal from {client_id}", self.id);
+        for peer in self.omnipaxos.get_peers() {
+            let done_msg = ClusterMessage::Done;
+            self.network.send_to_cluster(*peer, done_msg);
+        }
+        self.experiment_state.node_killed(self.id);
+    }
+
     fn log(
-        &self,
-        strategy: Option<(&ClusterStrategy, f64, f64)>,
-        new_strat: bool,
+        &mut self,
+        reconfigure: bool,
+        current_strat_latency: f64,
+        optimal_strat: &ClusterStrategy,
+        optimal_strat_latency: f64,
         cache_update: bool,
     ) {
-        let timestamp = Utc::now().timestamp_millis();
         let leader = self.omnipaxos.get_current_leader();
         let read_quorum = self.omnipaxos.get_read_config().read_quorum_size;
         let node_strat = leader.map(|l| {
             self.optimizer
                 .get_optimal_node_strat(l, read_quorum, self.id)
         });
-        let leader_json = serde_json::to_string(&leader).unwrap();
-        let operation_latency_json = serde_json::to_string(&node_strat).unwrap();
-        let metrics_json = serde_json::to_string(&self.metrics_server.metrics).unwrap();
-        let opt_strategy_latency =
-            strategy.map(|s| s.1 / self.metrics_server.metrics.get_total_load());
-        let curr_strategy_latency =
-            strategy.map(|s| s.2 / self.metrics_server.metrics.get_total_load());
-        let strategy_json = match strategy {
-            Some((strat, _, _)) => serde_json::to_string(strat).unwrap(),
-            None => serde_json::to_string(&None::<ClusterStrategy>).unwrap(),
+        let current_load = self.metrics_server.metrics.get_total_load();
+        let opt_strat_latency = optimal_strat_latency / current_load;
+        let curr_strat_latency = current_strat_latency / current_load;
+        let instrumentation = StrategyInstrumentation {
+            timestamp: Utc::now().timestamp_millis(),
+            reconfigure,
+            curr_strat_latency,
+            opt_strat_latency,
+            curr_strat: &self.strategy,
+            opt_strat: optimal_strat,
+            operation_latency: node_strat,
+            leader,
+            metrics_update: cache_update,
+            cluster_metrics: &self.metrics_server.metrics,
         };
-        let opt_strategy_latency_json = serde_json::to_string(&opt_strategy_latency).unwrap();
-        let curr_strategy_latency_json = serde_json::to_string(&curr_strategy_latency).unwrap();
-        println!("{{ \"timestamp\": {timestamp}, \"new_strat\": {new_strat}, \"opt_strat_latency\": {opt_strategy_latency_json:<20}, \"curr_strat_latency\": {curr_strategy_latency_json:<20}, \"cluster_strategy\": {strategy_json:<200}, \"operation_latency\": {operation_latency_json:<100}, \"leader\": {leader_json}, \"metrics_update\": {cache_update}, \"cluster_metrics\": {metrics_json} }}");
+        if self.first_log_entry {
+            self.first_log_entry = false;
+        } else {
+            self.output_file.write_all(b",\n").unwrap();
+        }
+        serde_json::to_writer_pretty(&mut self.output_file, &instrumentation).unwrap();
+
+        // let opt_strategy_latency_json = serde_json::to_string(&opt_strat_latency).unwrap();
+        // let curr_strategy_latency_json = serde_json::to_string(&curr_strat_latency).unwrap();
+        // println!("{{ \"timestamp\": {timestamp}, \"new_strat\": {new_strat}, \"opt_strat_latency\": {opt_strategy_latency_json:<20}, \"curr_strat_latency\": {curr_strategy_latency_json:<20}, \"cluster_strategy\": {strategy_json:<200}, \"operation_latency\": {operation_latency_json:<100}, \"leader\": {leader_json}, \"metrics_update\": {cache_update}, \"cluster_metrics\": {metrics_json} }}");
+    }
+
+    fn start_log(&mut self) {
+        let config_json = serde_json::to_string_pretty(&self.config).unwrap();
+        let log_start = format!("{{\n \"server_config\": {config_json},\n \"log\": [\n");
+        self.output_file.write_all(log_start.as_bytes()).unwrap();
+    }
+
+    fn end_log(&mut self) {
+        let end_array = b"\n]\n}";
+        self.output_file.write_all(end_array).unwrap();
+        self.output_file.flush().unwrap();
     }
 }
 
@@ -512,6 +551,7 @@ struct ExperimentState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum State {
     Running,
+    Killed,
     Done,
 }
 
@@ -529,6 +569,10 @@ impl ExperimentState {
         self.node_states[node as usize - 1] = State::Done;
     }
 
+    fn node_killed(&mut self, node: NodeId) {
+        self.node_states[node as usize - 1] = State::Killed;
+    }
+
     fn client_finished(&mut self, client: ClientId) {
         self.client_states[client as usize - 1] = State::Done;
     }
@@ -540,4 +584,22 @@ impl ExperimentState {
     fn is_finished(&self) -> bool {
         self.node_states.iter().all(|s| *s == State::Done)
     }
+
+    fn is_killed(&self, node: NodeId) -> bool {
+        self.node_states[node as usize - 1] == State::Killed
+    }
+}
+
+#[derive(Serialize)]
+struct StrategyInstrumentation<'a> {
+    timestamp: Timestamp,
+    reconfigure: bool,
+    curr_strat_latency: f64,
+    opt_strat_latency: f64,
+    curr_strat: &'a ClusterStrategy,
+    opt_strat: &'a ClusterStrategy,
+    operation_latency: Option<NodeStrategy>,
+    leader: Option<NodeId>,
+    metrics_update: bool,
+    cluster_metrics: &'a ClusterMetrics,
 }

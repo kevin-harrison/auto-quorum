@@ -3,6 +3,9 @@ location = "local-3"
 server_id = 3
 read_ratio = 0.25
 local_deployment = true
+#kill_signal_sec = 5
+summary_filepath = "../benchmarks/logs/local-run/client-3.json"
+output_filepath = "../benchmarks/logs/local-run/client-3.csv"
 
 [[request_rate_intervals]]
 duration_sec = 5
