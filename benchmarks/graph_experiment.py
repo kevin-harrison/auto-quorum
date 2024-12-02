@@ -1269,9 +1269,9 @@ def graph_test():
 
 
 def main():
-    graph_test()
+    # graph_test()
     # graph_local_bench()
-    # graph_round_robin_bench()
+    graph_round_robin_bench()
     # graph_shifting_load_bench()
     # graph_dynamic_flex_bench()
     # graph_read_heavy_bench()

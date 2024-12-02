@@ -73,7 +73,7 @@ class ServerConfig:
     rust_log: str = "info"
 
     @dataclass(frozen=True)
-    class MetronomeServerToml:
+    class AutoQuorumServerToml:
         location: str
         server_id: int
         num_clients: int
@@ -112,12 +112,12 @@ class ServerConfig:
         return new_config
 
     def generate_server_toml(self, cluster_config: ClusterConfig) -> str:
-        toml_fields = {f.name for f in fields(ServerConfig.MetronomeServerToml)}
+        toml_fields = {f.name for f in fields(ServerConfig.AutoQuorumServerToml)}
         shared_fields = {k: v for k, v in asdict(self).items() if k in toml_fields}
         cluster_shared_fields = {
             k: v for k, v in asdict(cluster_config).items() if k in toml_fields
         }
-        server_toml = ServerConfig.MetronomeServerToml(
+        server_toml = ServerConfig.AutoQuorumServerToml(
             location=self.instance_config.zone,
             **shared_fields,
             **cluster_shared_fields,
@@ -138,7 +138,7 @@ class ClientConfig:
     rust_log: str = "info"
 
     @dataclass(frozen=True)
-    class MetronomeClientToml:
+    class AutoQuorumClientToml:
         cluster_name: str
         location: str
         server_id: int
@@ -173,12 +173,12 @@ class ClientConfig:
         return new_config
 
     def generate_client_toml(self, cluster_config: ClusterConfig) -> str:
-        toml_fields = {f.name for f in fields(ClientConfig.MetronomeClientToml)}
+        toml_fields = {f.name for f in fields(ClientConfig.AutoQuorumClientToml)}
         shared_fields = {k: v for k, v in asdict(self).items() if k in toml_fields}
         cluster_shared_fields = {
             k: v for k, v in asdict(cluster_config).items() if k in toml_fields
         }
-        client_toml = ClientConfig.MetronomeClientToml(
+        client_toml = ClientConfig.AutoQuorumClientToml(
             location=self.instance_config.zone,
             **shared_fields,
             **cluster_shared_fields,
