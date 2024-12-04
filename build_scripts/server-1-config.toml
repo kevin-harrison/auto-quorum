@@ -1,6 +1,6 @@
 location = "local-1"
 server_id = 1
-num_clients = 2
+num_clients = 1
 output_filepath = "../benchmarks/logs/local-run/server-1.json"
 # Cluster-wide settings
 local_deployment = true

@@ -15,7 +15,11 @@ use omnipaxos::{
 };
 use omnipaxos_storage::memory_storage::MemoryStorage;
 use serde::Serialize;
-use std::{fs::File, io::Write, time::Duration};
+use std::{
+    fs::File,
+    io::{Seek, SeekFrom, Write},
+    time::Duration,
+};
 use tokio::time::interval;
 
 type OmniPaxosInstance = OmniPaxos<Command, MemoryStorage<Command>>;
@@ -37,7 +41,6 @@ pub struct OmniPaxosServer {
     optimize_threshold: f64,
     experiment_state: ExperimentState,
     output_file: File,
-    first_log_entry: bool,
     config: AutoQuorumServerConfig,
 }
 
@@ -73,7 +76,6 @@ impl OmniPaxosServer {
             optimize_threshold: config.optimize_threshold.unwrap_or(0.8),
             experiment_state: ExperimentState::initial_state(config.clone()),
             output_file,
-            first_log_entry: true,
             config,
         };
         // Clears outgoing_messages of initial BLE messages
@@ -107,12 +109,15 @@ impl OmniPaxosServer {
         loop {
             tokio::select! {
                 _ = optimize_interval.tick() => {
+                    // Still metric sync with optimize = False to mimic leader election heartbeats
                     let requests = self.metrics_server.tick();
                     for (to, request) in requests {
                         let cluster_msg = ClusterMessage::MetricSync(request);
                         self.network.send_to_cluster(to, cluster_msg);
                         }
-                    self.handle_optimize_timeout();
+                    if self.optimize {
+                        self.handle_optimize_timeout();
+                    }
                 },
                 _ = self.network.cluster_messages.recv_many(&mut cluster_msg_buf, NETWORK_BATCH_SIZE) => {
                         self.handle_cluster_messages(&mut cluster_msg_buf).await;
@@ -170,13 +175,6 @@ impl OmniPaxosServer {
     }
 
     fn handle_optimize_timeout(&mut self) {
-        if !self.optimize {
-            if self.first_log_entry {
-                // dummy log entry to create column names in pandas
-                self.log(false, 0.0, &self.strategy.clone(), 0.0, false)
-            }
-            return;
-        }
         self.update_current_strategy();
         let leader = self
             .omnipaxos
@@ -516,27 +514,23 @@ impl OmniPaxosServer {
             metrics_update: cache_update,
             cluster_metrics: &self.metrics_server.metrics,
         };
-        if self.first_log_entry {
-            self.first_log_entry = false;
-        } else {
-            self.output_file.write_all(b",\n").unwrap();
-        }
-        serde_json::to_writer_pretty(&mut self.output_file, &instrumentation).unwrap();
-
-        // let opt_strategy_latency_json = serde_json::to_string(&opt_strat_latency).unwrap();
-        // let curr_strategy_latency_json = serde_json::to_string(&curr_strat_latency).unwrap();
-        // println!("{{ \"timestamp\": {timestamp}, \"new_strat\": {new_strat}, \"opt_strat_latency\": {opt_strategy_latency_json:<20}, \"curr_strat_latency\": {curr_strategy_latency_json:<20}, \"cluster_strategy\": {strategy_json:<200}, \"operation_latency\": {operation_latency_json:<100}, \"leader\": {leader_json}, \"metrics_update\": {cache_update}, \"cluster_metrics\": {metrics_json} }}");
+        serde_json::to_writer(&mut self.output_file, &instrumentation).unwrap();
+        self.output_file.write_all(b",\n").unwrap();
     }
 
     fn start_log(&mut self) {
         let config_json = serde_json::to_string_pretty(&self.config).unwrap();
         let log_start = format!("{{\n \"server_config\": {config_json},\n \"log\": [\n");
         self.output_file.write_all(log_start.as_bytes()).unwrap();
+        // Dummy log entry to ensure column names in pandas
+        self.log(false, 0.0, &self.strategy.clone(), 0.0, false)
     }
 
     fn end_log(&mut self) {
-        let end_array = b"\n]\n}";
-        self.output_file.write_all(end_array).unwrap();
+        // Move back 2 bytes to overwrite the trailing ",\n"
+        self.output_file.seek(SeekFrom::End(-2)).unwrap();
+        let end_array_json = b"\n]\n}";
+        self.output_file.write_all(end_array_json).unwrap();
         self.output_file.flush().unwrap();
     }
 }

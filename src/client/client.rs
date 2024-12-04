@@ -12,9 +12,10 @@ pub struct ClientConfig {
     pub cluster_name: String,
     pub location: String,
     pub server_id: NodeId,
-    pub request_rate_intervals: Vec<RequestInterval>,
+    pub requests: Vec<RequestInterval>,
     pub local_deployment: Option<bool>,
-    pub kill_signal_sec: Option<(u64, NodeId)>,
+    pub kill_signal_sec: Option<u64>,
+    pub next_server: Option<NodeId>,
     pub sync_time: Option<Timestamp>,
     pub summary_filepath: String,
     pub output_filepath: String,
@@ -35,8 +36,8 @@ pub struct Client {
 impl Client {
     pub async fn new(config: ClientConfig) -> Self {
         let local_deployment = config.local_deployment.unwrap_or(false);
-        let server_ids = match config.kill_signal_sec {
-            Some((_, next_server)) => vec![config.server_id, next_server],
+        let server_ids = match config.next_server {
+            Some(next_server) => vec![config.server_id, next_server],
             None => vec![config.server_id],
         };
         let network = Network::new(
@@ -67,7 +68,7 @@ impl Client {
             _ => panic!("Error waiting for start signal"),
         }
 
-        let intervals = self.config.request_rate_intervals.clone();
+        let intervals = self.config.requests.clone();
         if intervals.is_empty() {
             return;
         }
@@ -83,7 +84,7 @@ impl Client {
         let mut kill_signal = self
             .config
             .kill_signal_sec
-            .map(|(delay, _next_server)| Box::pin(tokio::time::sleep(Duration::from_secs(delay))));
+            .map(|delay| Box::pin(tokio::time::sleep(Duration::from_secs(delay))));
 
         // Main event loop
         info!("{}: Starting requests", self.id);
@@ -121,9 +122,12 @@ impl Client {
                     info!("{}: Sending kill signal to {}", self.id, self.active_server);
                     kill_signal = None;
                     let kill_msg = ClientMessage::Kill;
-                    self.network.send(self.active_server, kill_msg).await;
                     // TODO: should cleanup connection task here
-                    self.active_server = self.config.kill_signal_sec.unwrap().1;
+                    self.network.send(self.active_server, kill_msg).await;
+                    match self.config.next_server {
+                        Some(next_server) => self.active_server = next_server,
+                        None => break,
+                    }
                 }
             }
         }
@@ -133,10 +137,13 @@ impl Client {
             self.id,
             self.client_data.response_count(),
         );
-        info!("{}: Sending done signal to {}", self.id, self.active_server);
-        self.network
-            .send(self.active_server, ClientMessage::Done)
-            .await;
+        if self.config.kill_signal_sec.is_none() || self.config.next_server.is_some() {
+            // Still connected to an active server
+            info!("{}: Sending done signal to {}", self.id, self.active_server);
+            self.network
+                .send(self.active_server, ClientMessage::Done)
+                .await;
+        }
         self.network.shutdown().await;
         self.save_results().expect("Failed to save results");
     }

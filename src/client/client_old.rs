@@ -21,7 +21,7 @@ pub struct ClientConfig {
     cluster_name: String,
     location: String,
     server_id: NodeId,
-    request_rate_intervals: Vec<RequestInterval>,
+    requests: Vec<RequestInterval>,
     local_deployment: Option<bool>,
     kill_signal_sec: Option<(u64, NodeId)>,
     sync_time: Option<Timestamp>,
@@ -58,7 +58,7 @@ impl Client {
         let writer_task = tokio::spawn(Self::writer_actor(
             to_server_conn,
             total_requests_tx,
-            config.request_rate_intervals.clone(),
+            config.requests.clone(),
         ));
         // Collect request data and shutdown cluster
         let (request_data, response_data) = tokio::join!(writer_task, reader_task);

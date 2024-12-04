@@ -74,6 +74,8 @@ def parse_client_log(output_file: Path, summary_file: Path) -> pd.DataFrame:
         client_data.response_time - client_data.request_time
     )
     client_data = client_data.astype(dtype={"request_time": "datetime64[ms]"})
+    # TODO: why do we get NaNs?
+    client_data.dropna(subset=["response_latency"], inplace=True)
     client_data.set_index("request_time", inplace=True)
     with open(summary_file, "r") as file:
         client_summary = json.load(file)
@@ -292,6 +294,12 @@ def graph_strategy_changes(fig, strategy_data):
 def graph_relative_request_rate_subplot(fig, clients_data):
     fig.set_ylim(bottom=0, top=1)
     fig.set_yticks([0.0, 0.5, 1.0])
+    # all_requests = pd.concat(clients_data.values())
+    # total_request_rate = all_requests.resample("1s").count()
+    # total_request_rate = total_request_rate.loc[
+    #     total_request_rate.response_latency != 0
+    # ]
+
     total_request_rate = pd.DataFrame()
     for requests in clients_data.values():
         request_rate = requests.resample("1s").count()
@@ -302,21 +310,27 @@ def graph_relative_request_rate_subplot(fig, clients_data):
     fig.set_xlim(
         left=total_request_rate.index.min(), right=total_request_rate.index.max()
     )
-    fig.set_xticks(fig.get_xticks()[1:])
-    for requests in clients_data.values():
+    # TODO: doesn't work, need to call draw first?
+    # fig.figure.canvas.draw() # doesn't work
+    # plt.setp(fig.get_xticklabels()[0], visible=False)
+    # # or
+    # fig.set_xticks(fig.get_xticks()[1:])
+    for id, requests in clients_data.items():
+        request_rate = requests.resample("1s").count()
         request_rate = requests.resample("1s").count() / total_request_rate
+        request_rate.fillna(0, inplace=True)
         ma = request_rate.ewm(alpha=0.9).mean()
         color = location_color(requests.attrs["location"])
         label = location_name(requests.attrs["location"])
         fig.plot(
             request_rate.index,
-            ma["response_latency"],
+            ma.response_latency,
             linestyle="-",
             color=color,
             linewidth=1,
         )
         fig.fill_between(
-            request_rate.index, ma["response_latency"], color=color, alpha=0.3
+            request_rate.index, ma.response_latency, color=color, alpha=0.3
         )
 
 
@@ -631,15 +645,44 @@ def graph_average_latency_comparison(
 ):
     clients_data, _, strategy_data = get_experiment_data(experiment_name)
     clients_data_no_opt, _, _ = get_experiment_data(no_optimize_experiment_name)
+
     # Go from UTC time to experiment time
+    epoch_start = pd.Timestamp("20180606")
     all_requests = pd.concat(clients_data.values())
-    relative_sync_time = min(all_requests.index)
-    experiment_start = pd.Timestamp("20180606")
+    start = min(all_requests.index)
     for client_data in clients_data.values():
-        client_data.index = experiment_start + (client_data.index - relative_sync_time)
+        client_data.index = epoch_start + (client_data.index - start)
+    strategy_data.index = epoch_start + (strategy_data.index - start)
+
+    all_requests_no_opt = pd.concat(clients_data_no_opt.values())
+    start = min(all_requests_no_opt.index)
     for client_data in clients_data_no_opt.values():
-        client_data.index = experiment_start + (client_data.index - relative_sync_time)
-    strategy_data.index = experiment_start + (strategy_data.index - relative_sync_time)
+        client_data.index = epoch_start + (client_data.index - start)
+
+    # # Go from UTC time to experiment time
+    # all_requests = pd.concat(clients_data.values())
+    # relative_sync_time = min(all_requests.index)
+    # experiment_start = pd.Timestamp("20180606")
+    # for client_data in clients_data.values():
+    #     client_data.index = experiment_start + (client_data.index - relative_sync_time)
+    # for client_data in clients_data_no_opt.values():
+    #     client_data.index = experiment_start + (client_data.index - relative_sync_time)
+    # strategy_data.index = experiment_start + (strategy_data.index - relative_sync_time)
+
+    fig, axs = graph_average_latency_comparison_base(
+        clients_data, clients_data_no_opt, strategy_data, title, labels, legend_args
+    )
+    plt.show()
+
+
+def graph_average_latency_comparison_base(
+    clients_data: dict[int, pd.DataFrame],
+    clients_data_no_opt: dict[int, pd.DataFrame],
+    strategy_data: pd.DataFrame,
+    title: str = "Request Latency with and without optimization",
+    labels: tuple[str, str] = ("with optimization", "without optimization"),
+    legend_args: dict = {"loc": "upper right"},
+):
     fig, axs = create_base_figure(title, clients_data, strategy_data)
 
     # Combine client requests in experiment
@@ -718,7 +761,7 @@ def graph_average_latency_comparison(
     #                 average_latency_no_opt.values + std_latency.values,  # Upper bound
     #                 color=no_opt_color, alpha=0.2)  # Adjust alpha for transparency
     fig.legend(**legend_args)
-    plt.show()
+    return fig, axs
 
 
 def graph_average_latency_comparison3(
@@ -898,7 +941,6 @@ def graph_average_latency_bar_chart(
         labels[0]: (opt_avg, opt_std, opt_color),
         labels[1]: (no_opt_avg, no_opt_std, no_opt_color),
     }
-    print(latency_means)
     _, _ = create_base_barchart(latency_means, bar_group_labels, legend_args)
     plt.show()
 
@@ -1032,20 +1074,85 @@ def graph_round_robin_bench():
     )
 
 
-# def graph_round_robin_bench():
-#     experiment_directory = "round-robin-2"
-#     experiment_name = experiment_directory + "/opt"
-#     experiment_name_no_opt = experiment_directory + "/no-opt"
-#     # graph_server_data(experiment_name)
-#     # graph_latency_estimation_comparison(experiment_name)
-#     # graph_cluster_latency(experiment_name)
-#     # graph_optimization_comparison(experiment_name, experiment_name_no_opt)
-#     title = 'Request Latency With and Without Leader Placement Optimization'
-#     labels = ("AutoQuorum", "[Madrid, (2,2), RAW]")
-#     labels = ("AutoQuorum", "Static Madrid Leader") # Presentation Labels
-#     legend_args = {"loc": 'upper left', "bbox_to_anchor": (0.09, 0.99), "fontsize": 12, "ncols": 1}
-#     graph_average_latency_comparison(experiment_name, experiment_name_no_opt, title, labels, legend_args)
-#     graph_average_latency_bar_chart(experiment_name, experiment_name_no_opt, title, labels)
+def graph_shifting_conditions_bench():
+    # experiment_directory = "shifting-conditions"
+    # experiment_name = experiment_directory + "/optimize-True"
+    # experiment_name_no_opt = experiment_directory + "/optimize-False"
+    # graph_server_data(experiment_name)
+    # graph_latency_estimation_comparison(experiment_name)
+    # graph_cluster_latency(experiment_name)
+    # graph_optimization_comparison(experiment_name, experiment_name_no_opt)
+    title = "Request Latency With and Without Optimization"
+    labels = ("AutoQuorum", "Static")  # Presentation Labels
+    legend_args = {
+        "loc": "upper left",
+        "bbox_to_anchor": (0.09, 0.99),
+        "fontsize": 12,
+        "ncols": 1,
+    }
+
+    # Stitch together periods into a single dataframe with continuous time
+    locations = {}
+    autoquorum_clients = {1:[], 2:[], 3:[], 4:[], 5:[]}
+    baseline_clients = {1:[], 2:[], 3:[], 4:[], 5:[]}
+    dummy_strat_data = pd.DataFrame()
+    epoch_start = pd.Timestamp("20180606")
+    for opt in ["autoquorum", "baseline"]:
+        period_time = epoch_start
+        for period in [1, 2, 3, 4]:
+            experiment_dir = f"shifting-conditions/period-{period}/{opt}"
+            clients_data, _, strategy_data = get_experiment_data(experiment_dir)
+            period_dur = pd.Timedelta(
+                seconds=clients_data[1].attrs["requests"][0]["duration_sec"]
+            )
+
+            requests = pd.concat(clients_data.values())
+            period_start = min(requests.index)
+            for id, data in clients_data.items():
+                data.index = period_time + (data.index - period_start)
+                if opt == "baseline":
+                    baseline_clients[id].append(data)
+                else:
+                    autoquorum_clients[id].append(data)
+                    locations[id] = data.attrs
+            if dummy_strat_data is None:
+                strategy_data.index = period_time + (strategy_data.index - period_start)
+                dummy_strat_data = strategy_data
+            period_time += period_dur
+
+    autoquorum_clients = {k:pd.concat(v) for k, v in autoquorum_clients.items()}
+    baseline_clients = {k:pd.concat(v) for k, v in baseline_clients.items()}
+    for id, df in autoquorum_clients.items():
+        df.attrs = locations[id]
+    for id, df in baseline_clients.items():
+        df.attrs = locations[id]
+    fig, axs = graph_average_latency_comparison_base(autoquorum_clients, baseline_clients, dummy_strat_data)
+    plt.show()
+
+            
+
+    # all_requests = pd.concat(clients_data.values())
+    # start = min(all_requests.index)
+    # for data in clients_data.values():
+    #     data.index = epoch_start + (data.index - start)
+    # strategy_data.index = epoch_start + (strategy_data.index - start)
+    #
+    # all_requests_no_opt = pd.concat(clients_data_no_opt.values())
+    # start = min(all_requests_no_opt.index)
+    # for data in clients_data_no_opt.values():
+    #     data.index = epoch_start + (data.index - start)
+
+    # all_requests = pd.concat(clients_data.values())
+    # all_requests_baseline = pd.concat(clients_data_baseline.values())
+    # period1_start = min(all_requests.index)
+
+    # graph_average_latency_comparison(
+    #     period1_autoquorum_dir, period1_baseline_dir, title, labels, legend_args
+    # )
+
+    # graph_average_latency_bar_chart(
+    #     experiment_name, experiment_name_no_opt, title, labels
+    # )
 
 
 def graph_shifting_load_bench():
@@ -1060,7 +1167,7 @@ def graph_shifting_load_bench():
     labels = ("AutoQuorum", "[Madrid, (2,2), RAW]")
     labels = ("AutoQuorum", "Static Madrid Leader")  # Presentation Labels
     legend_args = {"loc": "upper left", "bbox_to_anchor": (0.09, 0.99), "fontsize": 12}
-    graph_average_latency_comparison(
+    fig = graph_average_latency_comparison(
         experiment_name, experiment_name_no_opt, title, labels, legend_args
     )
     graph_average_latency_bar_chart(
@@ -1260,7 +1367,7 @@ def graph_test():
     client_data, server_data, strat_data = get_experiment_data(
         experiment_name, dump_server_df=True
     )
-    data = client_data[2]
+    data = client_data[1]
     relative_sync_time = min(data.index)
     experiment_start = pd.Timestamp("20180606")
     data.index = experiment_start + (data.index - relative_sync_time)
@@ -1271,7 +1378,8 @@ def graph_test():
 def main():
     # graph_test()
     # graph_local_bench()
-    graph_round_robin_bench()
+    # graph_round_robin_bench()
+    graph_shifting_conditions_bench()
     # graph_shifting_load_bench()
     # graph_dynamic_flex_bench()
     # graph_read_heavy_bench()

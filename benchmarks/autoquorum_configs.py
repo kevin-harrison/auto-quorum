@@ -31,7 +31,7 @@ class ClusterConfig:
                 raise ValueError(f"Read quorum must be greater than 2")
             if write_quorum < 2:
                 raise ValueError(f"Write quorum must be greater than 2")
-            if read_quorum + write_quorum > len(self.nodes):
+            if read_quorum + write_quorum <= len(self.nodes):
                 raise ValueError(
                     f"Flexible quorum {(read_quorum, write_quorum)} must guarantee overlap"
                 )
@@ -42,9 +42,28 @@ class ClusterConfig:
                     f"Optimize threshold {self.optimize_threshold} must be in range [0,1]"
                 )
 
-        for client_id in self.client_configs.keys():
+        for client_id, client_config in self.client_configs.items():
             if client_id not in self.server_configs.keys():
                 raise ValueError(f"Client {client_id} has no server to connect to")
+            if client_config.next_server:
+                if client_config.next_server not in self.server_configs.keys():
+                    raise ValueError(
+                        f"Client {client_id}'s next server {client_config.next_server} doesn't exist"
+                    )
+
+        for server_id, server_config in self.server_configs.items():
+            client_configs = self.client_configs.values()
+            server_id_matches = sum(
+                1 for _ in filter(lambda c: c.server_id == server_id, client_configs)
+            )
+            next_id_matches = sum(
+                1 for _ in filter(lambda c: c.next_server == server_id, client_configs)
+            )
+            total_matches = server_id_matches + next_id_matches
+            if server_config.num_clients != total_matches:
+                raise ValueError(
+                    f"Server {server_id} has {server_config.num_clients} clients but found {total_matches} references among client configs"
+                )
 
         if self.initial_leader not in self.server_configs.keys():
             raise ValueError(
@@ -85,7 +104,7 @@ class ServerConfig:
         initial_flexible_quorum: FlexibleQuorum | None
         optimize: bool | None
         optimize_threshold: float | None
-        initial_read_strat: list[ReadStrategy] | None
+        initial_read_strat: list[str] | None
 
     def __post_init__(self):
         self.validate()
@@ -117,6 +136,10 @@ class ServerConfig:
         cluster_shared_fields = {
             k: v for k, v in asdict(cluster_config).items() if k in toml_fields
         }
+        read_strat_enums = cluster_shared_fields["initial_read_strat"]
+        if read_strat_enums is not None:
+            read_strat_strs = [enum.value for enum in read_strat_enums]
+            cluster_shared_fields["initial_read_strat"] = read_strat_strs
         server_toml = ServerConfig.AutoQuorumServerToml(
             location=self.instance_config.zone,
             **shared_fields,
@@ -130,8 +153,9 @@ class ServerConfig:
 class ClientConfig:
     instance_config: InstanceConfig
     server_id: int
-    request_rate_intervals: list[RequestInterval]
+    requests: list[RequestInterval]
     kill_signal_sec: int | None
+    next_server: int | None
     summary_filepath: str
     output_filepath: str
     image_path: str
@@ -142,8 +166,9 @@ class ClientConfig:
         cluster_name: str
         location: str
         server_id: int
-        request_rate_intervals: list[RequestInterval]
+        requests: list[RequestInterval]
         kill_signal_sec: int | None
+        next_server: int | None
         summary_filepath: str
         output_filepath: str
 
@@ -160,6 +185,14 @@ class ClientConfig:
             if self.kill_signal_sec < 0:
                 raise ValueError(
                     f"Kill signal {self.kill_signal_sec} must be non-negative"
+                )
+
+        if self.next_server:
+            if self.kill_signal_sec is None:
+                raise ValueError(f"Can't have next_server without kill signal")
+            if self.next_server <= 0:
+                raise ValueError(
+                    f"Invalid next_server: {self.next_server}. It must be greater than 0."
                 )
 
         valid_rust_log_levels = ["error", "debug", "trace", "info", "warn"]

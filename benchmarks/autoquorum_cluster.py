@@ -177,6 +177,12 @@ class AutoQuorumCluster:
         self._client_processes.clear()
         self._server_processes.clear()
 
+    def run(self, logs_directory: Path):
+        self.start_servers()
+        self.start_clients()
+        self.await_cluster()
+        self.get_logs(logs_directory)
+
     def shutdown(self):
         instance_names = [
             c.instance_config.name for c in self._cluster_config.server_configs.values()
@@ -250,9 +256,8 @@ class AutoQuorumCluster:
         server_config_toml = server_config.generate_server_toml(self._cluster_config)
 
         # pull_command = f"docker pull {container_image_location} > /dev/null"
-        # kill_prev_container_command = f"docker kill {container_name} > /dev/null 2>&1"
         pull_command = f"docker pull {server_config.image_path}"
-        kill_prev_container_command = f"docker kill {container_name}"
+        kill_prev_container_command = f"docker kill {container_name} > /dev/null 2>&1"
         gen_config_command = f"mkdir -p {instance_output_dir} && echo -e '{server_config_toml}' > {instance_config_location}"
         docker_command = f"""docker run \\
             --name {container_name} \\
@@ -283,7 +288,7 @@ class AutoQuorumCluster:
         # pull_command = f"docker pull gcr.io/{container_image_location} > /dev/null"
         # kill_prev_container_command = f"docker kill {container_name} > /dev/null 2>&1"
         pull_command = f"docker pull {client_config.image_path}"
-        kill_prev_container_command = f"docker kill {container_name}"
+        kill_prev_container_command = f"docker kill {container_name} > /dev/null 2>&1"
         gen_config_command = f"mkdir -p {instance_output_dir} && echo -e '{client_config_toml}' > {instance_config_location}"
         docker_command = f"""docker run \\
         --name={container_name} \\
@@ -324,11 +329,10 @@ class AutoQuorumClusterBuilder:
         self._optimize_threshold: float | None = None
         self._initial_read_strategy: list[ReadStrategy] | None = None
 
-    def add_server(
+    def server(
         self,
         server_id: int,
         zone: str,
-        num_clients: int = 1,
         machine_type: str = "e2-standard-8",
         rust_log: str = "info",
     ):
@@ -345,7 +349,7 @@ class AutoQuorumClusterBuilder:
         server_config = ServerConfig(
             instance_config=instance_config,
             server_id=server_id,
-            num_clients=num_clients,
+            num_clients=0,  # placeholder
             output_filepath=f"server-{server_id}.json",
             image_path=self._server_docker_image_path,
             rust_log=rust_log,
@@ -353,12 +357,13 @@ class AutoQuorumClusterBuilder:
         self._server_configs[server_id] = server_config
         return self
 
-    def add_client(
+    def client(
         self,
         server_id: int,
         zone: str,
-        request_rate_intervals: list[RequestInterval] = [],
+        requests: list[RequestInterval] = [],
         kill_signal_sec: int | None = None,
+        next_server: int | None = None,
         machine_type: str = "e2-standard-2",
         rust_log: str = "info",
     ):
@@ -374,8 +379,9 @@ class AutoQuorumClusterBuilder:
         client_config = ClientConfig(
             instance_config=instance_config,
             server_id=server_id,
-            request_rate_intervals=request_rate_intervals,
+            requests=requests,
             kill_signal_sec=kill_signal_sec,
+            next_server=next_server,
             summary_filepath=f"client-{server_id}.json",
             output_filepath=f"client-{server_id}.csv",
             image_path=self._client_docker_image_path,
@@ -384,27 +390,40 @@ class AutoQuorumClusterBuilder:
         self._client_configs[server_id] = client_config
         return self
 
-    def set_initial_leader(self, initial_leader: int):
+    def initial_leader(self, initial_leader: int):
         self._initial_leader = initial_leader
         return self
 
-    def set_initial_quorum(self, flex_quorum: FlexibleQuorum):
+    def initial_quorum(self, flex_quorum: FlexibleQuorum):
         self._initial_quorum = flex_quorum
         return self
 
-    def set_optimize_setting(self, optimize: bool):
+    def optimize_setting(self, optimize: bool):
         self._optimize_setting = optimize
         return self
 
-    def set_initial_read_strategy(self, initial_read_strategy: list[ReadStrategy]):
+    def initial_read_strategy(self, initial_read_strategy: list[ReadStrategy]):
         self._initial_read_strategy = initial_read_strategy
         return self
 
-    def set_optimize_threshold(self, threshold: float):
+    def optimize_threshold(self, threshold: float):
         self._optimize_threshold = threshold
         return self
 
     def build(self) -> AutoQuorumCluster:
+        for server_id, server_config in self._server_configs.items():
+            client_configs = self._client_configs.values()
+            server_id_matches = sum(
+                1 for _ in filter(lambda c: c.server_id == server_id, client_configs)
+            )
+            next_id_matches = sum(
+                1 for _ in filter(lambda c: c.next_server == server_id, client_configs)
+            )
+            total_matches = server_id_matches + next_id_matches
+            self._server_configs[server_id] = replace(
+                server_config, num_clients=total_matches
+            )
+
         if self._initial_leader is None:
             raise ValueError("Need to set cluster's initial leader")
         cluster_config = ClusterConfig(
