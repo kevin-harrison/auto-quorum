@@ -19,6 +19,10 @@ class ClusterConfig:
     initial_read_strat: list[ReadStrategy] | None
     server_configs: dict[int, ServerConfig]
     client_configs: dict[int, ClientConfig]
+    multileader: bool
+    client_image: str
+    server_image: str
+    multileader_server_image: str
 
     def __post_init__(self):
         self.validate()
@@ -88,8 +92,7 @@ class ServerConfig:
     server_id: int
     num_clients: int
     output_filepath: str
-    image_path: str
-    rust_log: str = "info"
+    rust_log: str
 
     @dataclass(frozen=True)
     class AutoQuorumServerToml:
@@ -158,7 +161,6 @@ class ClientConfig:
     next_server: int | None
     summary_filepath: str
     output_filepath: str
-    image_path: str
     rust_log: str = "info"
 
     @dataclass(frozen=True)

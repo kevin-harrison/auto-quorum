@@ -59,6 +59,23 @@ impl Client {
     }
 
     pub async fn run(&mut self) {
+        // Early ends
+        let intervals = self.config.requests.clone();
+        if intervals.is_empty() {
+            self.save_results().expect("Failed to save results");
+            return;
+        }
+        match (self.config.kill_signal_sec, self.config.next_server) {
+            (Some(0), None) => {
+                let kill_msg = ClientMessage::Kill;
+                self.network.send(self.active_server, kill_msg).await;
+                self.network.shutdown().await;
+                self.save_results().expect("Failed to save results");
+                return;
+            }
+            _ => (),
+        }
+
         // Wait for server to signal start
         info!("{}: Waiting for start signal from server", self.id);
         match self.network.server_messages.recv().await {
@@ -66,11 +83,6 @@ impl Client {
                 Self::wait_until_sync_time(&mut self.config, start_time).await;
             }
             _ => panic!("Error waiting for start signal"),
-        }
-
-        let intervals = self.config.requests.clone();
-        if intervals.is_empty() {
-            return;
         }
 
         // Initialize intervals
@@ -90,6 +102,7 @@ impl Client {
         info!("{}: Starting requests", self.id);
         loop {
             tokio::select! {
+                biased;
                 Some(msg) = self.network.server_messages.recv() => {
                     self.handle_server_message(msg);
                     if self.run_finished() {

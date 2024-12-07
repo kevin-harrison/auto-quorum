@@ -2,6 +2,7 @@ import subprocess
 import time
 from itertools import chain
 from pathlib import Path
+from typing import KeysView
 
 from autoquorum_configs import *
 from gcp_cluster import GcpCluster, InstanceConfig
@@ -233,6 +234,9 @@ class AutoQuorumCluster:
             **kwargs
         )
 
+    def get_nodes(self) -> KeysView[int]:
+        return self._cluster_config.server_configs.keys()
+
     def _get_server_config(self, server_id: int) -> ServerConfig:
         server_config = self._cluster_config.server_configs.get(server_id)
         if server_config is None:
@@ -246,28 +250,29 @@ class AutoQuorumCluster:
         return client_config
 
     def _start_server_command(self, server_id: int, pull_image: bool = False) -> str:
-        server_config = self._get_server_config(server_id)
+        config = self._get_server_config(server_id)
         container_name = "server"
+        image_path = self._cluster_config.multileader_server_image if self._cluster_config.multileader else self._cluster_config.server_image
         instance_config_location = "~/server-config.toml"
         container_config_location = "/home/$(whoami)/server-config.toml"
         instance_output_dir = "./results"
         container_output_dir = "/app"
-        stderr_pipe = f"{instance_output_dir}/xerr-server-{server_config.server_id}.log"
-        server_config_toml = server_config.generate_server_toml(self._cluster_config)
+        stderr_pipe = f"{instance_output_dir}/xerr-server-{config.server_id}.log"
+        server_config_toml = config.generate_server_toml(self._cluster_config)
 
         # pull_command = f"docker pull {container_image_location} > /dev/null"
-        pull_command = f"docker pull {server_config.image_path}"
+        pull_command = f"docker pull {image_path}"
         kill_prev_container_command = f"docker kill {container_name} > /dev/null 2>&1"
         gen_config_command = f"mkdir -p {instance_output_dir} && echo -e '{server_config_toml}' > {instance_config_location}"
         docker_command = f"""docker run \\
             --name {container_name} \\
-            -p 800{server_config.server_id}:800{server_config.server_id} \\
-            --env RUST_LOG={server_config.rust_log} \\
+            -p 800{config.server_id}:800{config.server_id} \\
+            --env RUST_LOG={config.rust_log} \\
             --env CONFIG_FILE="{container_config_location}" \\
             -v {instance_config_location}:{container_config_location} \\
             -v {instance_output_dir}:{container_output_dir} \\
             --rm \\
-            "{server_config.image_path}" \\
+            "{image_path}" \\
             2> {stderr_pipe}"""
         if pull_image:
             full_command = f"{kill_prev_container_command}; {pull_command}; {gen_config_command} && {docker_command}"
@@ -277,27 +282,28 @@ class AutoQuorumCluster:
         return full_command
 
     def _start_client_command(self, client_id: int, pull_image: bool = False) -> str:
-        client_config = self._get_client_config(client_id)
+        config = self._get_client_config(client_id)
         container_name = "client"
+        image_path = self._cluster_config.client_image
         instance_config_location = "~/client-config.toml"
         container_config_location = f"/home/$(whoami)/client-config.toml"
         instance_output_dir = "./results"
         container_output_dir = "/app"
-        client_config_toml = client_config.generate_client_toml(self._cluster_config)
+        client_config_toml = config.generate_client_toml(self._cluster_config)
 
         # pull_command = f"docker pull gcr.io/{container_image_location} > /dev/null"
         # kill_prev_container_command = f"docker kill {container_name} > /dev/null 2>&1"
-        pull_command = f"docker pull {client_config.image_path}"
+        pull_command = f"docker pull {image_path}"
         kill_prev_container_command = f"docker kill {container_name} > /dev/null 2>&1"
         gen_config_command = f"mkdir -p {instance_output_dir} && echo -e '{client_config_toml}' > {instance_config_location}"
         docker_command = f"""docker run \\
         --name={container_name} \\
         --rm \\
-        --env RUST_LOG={client_config.rust_log} \\
+        --env RUST_LOG={config.rust_log} \\
         --env CONFIG_FILE={container_config_location} \\
         -v {instance_config_location}:{container_config_location} \\
         -v {instance_output_dir}:{container_output_dir} \\
-        {client_config.image_path}"""
+        {image_path}"""
         if pull_image:
             full_command = f"{kill_prev_container_command}; {pull_command}; {gen_config_command} && {docker_command}"
         else:
@@ -319,6 +325,7 @@ class AutoQuorumClusterBuilder:
         self._service_account = f"deployment@{project_id}.iam.gserviceaccount.com"
         self._gcloud_ssh_user = GcpCluster.get_oslogin_username()
         self._server_docker_image_path = f"gcr.io/{project_id}/autoquorum_server"
+        self._multileader_server_docker_image_path = f"gcr.io/{project_id}/autoquorum_multileader-server"
         self._client_docker_image_path = f"gcr.io/{project_id}/autoquorum_client"
         self._server_configs: dict[int, ServerConfig] = {}
         self._client_configs: dict[int, ClientConfig] = {}
@@ -328,6 +335,7 @@ class AutoQuorumClusterBuilder:
         self._optimize_setting: bool | None = None
         self._optimize_threshold: float | None = None
         self._initial_read_strategy: list[ReadStrategy] | None = None
+        self._multileader: bool = False
 
     def server(
         self,
@@ -342,16 +350,15 @@ class AutoQuorumClusterBuilder:
             f"{self.cluster_name}-server-{server_id}",
             zone,
             machine_type,
-            self._docker_startup_script(self._server_docker_image_path),
+            self._docker_startup_script(self._server_docker_image_path, self._multileader_server_docker_image_path),
             dns_name=f"{self.cluster_name}-server-{server_id}",
             service_account=self._service_account,
         )
         server_config = ServerConfig(
             instance_config=instance_config,
             server_id=server_id,
-            num_clients=0,  # placeholder
+            num_clients=0,
             output_filepath=f"server-{server_id}.json",
-            image_path=self._server_docker_image_path,
             rust_log=rust_log,
         )
         self._server_configs[server_id] = server_config
@@ -384,7 +391,6 @@ class AutoQuorumClusterBuilder:
             next_server=next_server,
             summary_filepath=f"client-{server_id}.json",
             output_filepath=f"client-{server_id}.csv",
-            image_path=self._client_docker_image_path,
             rust_log=rust_log,
         )
         self._client_configs[server_id] = client_config
@@ -409,8 +415,13 @@ class AutoQuorumClusterBuilder:
     def optimize_threshold(self, threshold: float):
         self._optimize_threshold = threshold
         return self
+    
+    def multileader(self, multileader: bool):
+        self._multileader = multileader
+        return self
 
     def build(self) -> AutoQuorumCluster:
+        # Edit server configs based on cluster-wide settings
         for server_id, server_config in self._server_configs.items():
             client_configs = self._client_configs.values()
             server_id_matches = sum(
@@ -420,12 +431,11 @@ class AutoQuorumClusterBuilder:
                 1 for _ in filter(lambda c: c.next_server == server_id, client_configs)
             )
             total_matches = server_id_matches + next_id_matches
-            self._server_configs[server_id] = replace(
-                server_config, num_clients=total_matches
-            )
+            self._server_configs[server_id] = replace(server_config, num_clients=total_matches)
 
         if self._initial_leader is None:
             raise ValueError("Need to set cluster's initial leader")
+
         cluster_config = ClusterConfig(
             cluster_name=self.cluster_name,
             nodes=sorted(self._server_configs.keys()),
@@ -436,10 +446,17 @@ class AutoQuorumClusterBuilder:
             initial_read_strat=self._initial_read_strategy,
             server_configs=self._server_configs,
             client_configs=self._client_configs,
+            multileader=self._multileader,
+            client_image=self._client_docker_image_path,
+            server_image=self._server_docker_image_path,
+            multileader_server_image=self._multileader_server_docker_image_path,
         )
         return AutoQuorumCluster(self._project_id, cluster_config)
 
-    def _docker_startup_script(self, container_image_path: str) -> str:
+    def _docker_startup_script(self,
+        image_path: str,
+        alternative_image_path: str | None = None
+    ) -> str:
         """
         Generates the startup script for a AutoQuorum client on a GCP instance.
 
@@ -447,6 +464,7 @@ class AutoQuorumClusterBuilder:
         For debugging, SSH into the instance and run `sudo journalctl -u google-startup-scripts.service`.
         """
         user = self._gcloud_ssh_user
+        pull_alt_image_command = f"sudo -u {user} docker pull \"{alternative_image_path}\"" if alternative_image_path else ""
         return f"""#! /bin/bash
 # Ensure OS login user is setup
 useradd -m {user}
@@ -460,5 +478,6 @@ sudo groupadd docker
 sudo usermod -aG docker {user}
 
 # Pull the container as user
-sudo -u {user} docker pull "{container_image_path}"
+sudo -u {user} docker pull "{image_path}"
+{pull_alt_image_command}
 """

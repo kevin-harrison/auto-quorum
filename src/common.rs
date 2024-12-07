@@ -6,7 +6,7 @@ pub mod messages {
     use serde::{Deserialize, Serialize};
 
     use super::{
-        kv::{ClientId, Command, CommandId, KVCommand},
+        kv::{ClientId, Command, CommandId, InstanceId, KVCommand},
         utils::Timestamp,
     };
 
@@ -24,6 +24,13 @@ pub mod messages {
         MetricSync(MetricSync),
         ReadStrategyUpdate(Vec<ReadStrategy>),
         LeaderStartSignal(Timestamp),
+        Done,
+    }
+
+    #[derive(Clone, Debug, Serialize, Deserialize)]
+    pub enum MultiLeaderClusterMessage {
+        OmniPaxosMessage(InstanceId, OmniPaxosMessage<Command>),
+        MetricSync(MetricSync),
         Done,
     }
 
@@ -146,6 +153,7 @@ pub mod kv {
     pub type CommandId = usize;
     pub type ClientId = u64;
     pub type NodeId = omnipaxos::util::NodeId;
+    pub type InstanceId = NodeId;
 
     #[derive(Debug, Clone, Entry, Serialize, Deserialize)]
     pub struct Command {
@@ -270,30 +278,59 @@ pub mod utils {
         )
     }
 
-    pub type ServerConnection = Framed<
-        CodecFramed<TcpStream, LengthDelimitedCodec>,
-        ServerMessage,
-        ClientMessage,
-        Bincode<ServerMessage, ClientMessage>,
+    pub type FromMultiLeaderNodeConnection = Framed<
+        FramedRead<OwnedReadHalf, LengthDelimitedCodec>,
+        MultiLeaderClusterMessage,
+        (),
+        Bincode<MultiLeaderClusterMessage, ()>,
     >;
+    pub type ToMultiLeaderNodeConnection = Framed<
+        FramedWrite<OwnedWriteHalf, LengthDelimitedCodec>,
+        (),
+        MultiLeaderClusterMessage,
+        Bincode<(), MultiLeaderClusterMessage>,
+    >;
+
+    pub fn frame_multileader_cluster_connection(
+        stream: TcpStream,
+    ) -> (FromMultiLeaderNodeConnection, ToMultiLeaderNodeConnection) {
+        let (reader, writer) = stream.into_split();
+        let stream = FramedRead::new(reader, LengthDelimitedCodec::new());
+        let sink = FramedWrite::new(writer, LengthDelimitedCodec::new());
+        (
+            FromMultiLeaderNodeConnection::new(stream, Bincode::default()),
+            ToMultiLeaderNodeConnection::new(sink, Bincode::default()),
+        )
+    }
+
+    // pub type ServerConnection = Framed<
+    //     CodecFramed<TcpStream, LengthDelimitedCodec>,
+    //     ServerMessage,
+    //     ClientMessage,
+    //     Bincode<ServerMessage, ClientMessage>,
+    // >;
+
     pub type FromServerConnection = Framed<
         FramedRead<OwnedReadHalf, LengthDelimitedCodec>,
         ServerMessage,
         (),
         Bincode<ServerMessage, ()>,
     >;
+
     pub type ToServerConnection = Framed<
         FramedWrite<OwnedWriteHalf, LengthDelimitedCodec>,
         (),
         ClientMessage,
         Bincode<(), ClientMessage>,
     >;
+
     pub type FromClientConnection = Framed<
         FramedRead<OwnedReadHalf, LengthDelimitedCodec>,
         ClientMessage,
         (),
         Bincode<ClientMessage, ()>,
     >;
+
     pub type ToClientConnection = Framed<
         FramedWrite<OwnedWriteHalf, LengthDelimitedCodec>,
         (),
@@ -312,6 +349,7 @@ pub mod utils {
             ToServerConnection::new(sink, Bincode::default()),
         )
     }
+
     // pub fn frame_clients_connection(stream: TcpStream) -> ServerConnection {
     //     let length_delimited = CodecFramed::new(stream, LengthDelimitedCodec::new());
     //     Framed::new(length_delimited, Bincode::default())

@@ -98,7 +98,8 @@ impl OmniPaxosServer {
         // Once the leader is established it chooses a synchronization point which the
         // followers relay to their clients to begin the experiment.
         if self.config.initial_leader == self.id {
-            self.become_initial_leader(&mut cluster_msg_buf).await;
+            self.become_initial_leader(&mut cluster_msg_buf, &mut client_msg_buf)
+                .await;
             let experiment_sync_start = (Utc::now() + Duration::from_secs(2)).timestamp_millis();
             self.send_cluster_start_signals(experiment_sync_start);
             self.send_client_start_signals(experiment_sync_start);
@@ -138,6 +139,7 @@ impl OmniPaxosServer {
     async fn become_initial_leader(
         &mut self,
         cluster_msg_buffer: &mut Vec<(NodeId, ClusterMessage)>,
+        client_msg_buffer: &mut Vec<(ClientId, ClientMessage)>,
     ) {
         let mut leader_attempt = 0;
         let mut leader_takeover_interval = tokio::time::interval(LEADER_WAIT);
@@ -152,6 +154,9 @@ impl OmniPaxosServer {
                 },
                 _ = self.network.cluster_messages.recv_many(cluster_msg_buffer, NETWORK_BATCH_SIZE) => {
                     self.handle_cluster_messages(cluster_msg_buffer).await;
+                },
+                _ = self.network.client_messages.recv_many(client_msg_buffer, NETWORK_BATCH_SIZE) => {
+                    self.handle_client_messages(client_msg_buffer).await;
                 },
             }
         }
