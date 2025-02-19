@@ -2,7 +2,12 @@
 
 usage="Usage: push-server-image.sh [server_type]"
 server_bin="server"
-if [ -n "$1" ]; then
+
+if [ -n "$1" ] && [ "$1" != "multi" ]; then
+    echo "Error: Invalid argument. Expected 'multi', got '$1'."
+    exit 1
+fi
+if [ "$1" = "multi" ]; then
     server_bin="multileader-server"
 fi
 

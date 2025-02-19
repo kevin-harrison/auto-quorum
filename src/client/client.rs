@@ -67,8 +67,10 @@ impl Client {
         }
         match (self.config.kill_signal_sec, self.config.next_server) {
             (Some(0), None) => {
+                info!("{}: Sending kill signal to {}", self.id, self.active_server);
                 let kill_msg = ClientMessage::Kill;
                 self.network.send(self.active_server, kill_msg).await;
+                tokio::time::sleep(Duration::from_secs(5)).await;
                 self.network.shutdown().await;
                 self.save_results().expect("Failed to save results");
                 return;
@@ -199,6 +201,9 @@ impl Client {
     // Wait until the scheduled start time to synchronize client starts.
     // If start time has already passed, start immediately.
     async fn wait_until_sync_time(config: &mut ClientConfig, scheduled_start_utc_ms: i64) {
+        // // Desync the clients a bit
+        // let mut rng = rand::thread_rng();
+        // let scheduled_start_utc_ms = scheduled_start_utc_ms + rng.gen_range(1..100);
         let now = Utc::now();
         let milliseconds_until_sync = scheduled_start_utc_ms - now.timestamp_millis();
         config.sync_time = Some(milliseconds_until_sync);

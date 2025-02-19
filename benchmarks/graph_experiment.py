@@ -8,6 +8,7 @@ import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from pandas.core.arrays import period
 
 
 @dataclass
@@ -45,6 +46,7 @@ def find_experiment_logs(experiment_name: str) -> ExperimentFiles:
 
 
 def parse_server_log(output_file: Path, dump_df: bool = False) -> pd.DataFrame:
+    print("parsing", output_file)
     with open(output_file, "r") as file:
         server_output = json.load(file)
     server_data = pd.json_normalize(server_output["log"])
@@ -79,8 +81,6 @@ def parse_client_log(output_file: Path, summary_file: Path) -> pd.DataFrame:
         client_data.response_time - client_data.request_time
     )
     client_data = client_data.astype(dtype={"request_time": "datetime64[ms]"})
-    # TODO: why do we get NaNs?
-    # client_data.dropna(subset=["response_latency"], inplace=True)
     client_data.set_index("request_time", inplace=True)
     with open(summary_file, "r") as file:
         client_summary = json.load(file)
@@ -98,7 +98,7 @@ def get_experiment_data(
     strategy_data = []
     experiment_files = find_experiment_logs(experiment_name)
     for id, server_log_file in experiment_files.server_files.items():
-        server_data = parse_server_log(server_log_file, True)
+        server_data = parse_server_log(server_log_file, dump_server_df)
         server_color = location_color(server_data.attrs["location"])
         server_colors[id] = server_color
         server_locations[id] = server_data.attrs["location"]
@@ -132,7 +132,7 @@ def get_strategy_columns(server_data: pd.DataFrame) -> list[str]:
     return strategy_cols + normalized_columns
 
 
-def location_name(location: str) -> str:
+def location_name(location: str, leader: bool=False) -> str:
     if location.startswith("local"):
         return location
     name_mapping = {
@@ -149,7 +149,7 @@ def location_name(location: str) -> str:
     name = name_mapping.get(location)
     if name is None:
         raise ValueError(f"Don't have name for location {location}")
-    return name
+    return name + "*" if leader else name
 
 
 def location_color(location: str):
@@ -234,7 +234,7 @@ def create_base_figure(
     fig.gca().xaxis.set_major_formatter(myFmt)
     axs[0].tick_params(bottom=False)
     axs[1].tick_params(bottom=False)
-    graph_strategy_changes(axs[0], strategy_data)
+    # graph_strategy_changes(axs[0], strategy_data)
     graph_relative_request_rate_subplot(axs[1], clients_data)
     # graph_request_rate_subplot(axs[1], clients_data)
     # plt.tight_layout()
@@ -308,7 +308,7 @@ def graph_relative_request_rate_subplot(fig, clients_data):
 
     total_request_rate = pd.DataFrame()
     for requests in clients_data.values():
-        request_rate = requests.resample("1s").count()
+        request_rate = requests.resample("3s").count()
         total_request_rate = total_request_rate.add(request_rate, fill_value=0)
     total_request_rate = total_request_rate[
         (total_request_rate["response_latency"] != 0)
@@ -322,8 +322,8 @@ def graph_relative_request_rate_subplot(fig, clients_data):
     # # or
     # fig.set_xticks(fig.get_xticks()[1:])
     for id, requests in clients_data.items():
-        request_rate = requests.resample("1s").count()
-        request_rate = requests.resample("1s").count() / total_request_rate
+        # request_rate = requests.resample("3s").count()
+        request_rate = requests.resample("3s").count() / total_request_rate
         request_rate.fillna(0, inplace=True)
         ma = request_rate.ewm(alpha=0.9).mean()
         color = location_color(requests.attrs["location"])
@@ -377,20 +377,18 @@ def create_base_barchart(
 ):
     axis_label_size = 20
     axis_tick_size = 12
-    textures = ["/", ".", "-", "-"]  # Different hatch patterns
-    texture_index = 0
-    x = np.arange(len(bar_group_labels))  # the label locations
-    bar_group_size = len(latency_means)
+    num_bars_per_group = len(latency_means)
     width = 0.25  # the width of the bars
-    multiplier = 0.5
-    # fig, ax = plt.subplots(layout="constrained", figsize=(10, 6))
-    for bar_in_group_label, (avg, std_dev, color) in latency_means.items():
+    x = np.arange(len(bar_group_labels)) * (num_bars_per_group + 1) * width  # Adjust spacing between groups
+    multiplier = 0
+
+    for bar_in_group_label, (avg, std_dev, color, hatch) in latency_means.items():
         avg = tuple(0 if v is None else v for v in avg)
         std_dev = tuple(0 if v is None else v for v in std_dev)
         if error_bars is False:
             std_dev = None
         offset = width * multiplier
-        _rects = ax.bar(
+        ax.bar(
             x + offset,
             avg,
             width,
@@ -399,7 +397,7 @@ def create_base_barchart(
             edgecolor="black",
             yerr=std_dev,
             linewidth=1.5,
-            # hatch=textures[texture_index]
+            hatch=hatch,
         )
         ax.errorbar(
             x + offset,
@@ -410,10 +408,12 @@ def create_base_barchart(
             elinewidth=1,  # Width of the error bars
             color="black",  # Color of the error bars
         )
-        texture_index += 1
-        # Adds value labels above bars
-        # ax.bar_label(rects, fmt='%.2f', padding=3)
         multiplier += 1
+
+    # Add consistent group spacing
+    ax.set_xticks(x + (width * (num_bars_per_group - 1)) / 2)
+    ax.set_xticklabels(bar_group_labels, fontsize=axis_label_size)
+
     ax.set_ylabel("Latency (ms)", fontsize=axis_label_size)
     ax.tick_params(axis="y", labelsize=axis_tick_size)
     ax.tick_params(bottom=False)  # ax.tick_params(left=False, bottom=False)
@@ -424,12 +424,6 @@ def create_base_barchart(
     ax.spines["right"].set_visible(False)
     # ax.spines['left'].set_visible(False)
     # ax.spines['bottom'].set_color('#DDDDDD')
-    if bar_group_size == 2:
-        ax.set_xticks(x + width, bar_group_labels, fontsize=axis_label_size)
-    elif bar_group_size == 3:
-        ax.set_xticks(x + width * 1.5, bar_group_labels, fontsize=axis_label_size)
-    else:
-        raise ValueError(f"Haven't implemented {bar_group_size} sized bar groups")
 
 
 def print_strats(strategy_data: pd.DataFrame):
@@ -511,23 +505,23 @@ def graph_server_data(experiment_name: str, specific_server: int | None = None):
                 label=f"Peer {peer} ({peer_location}) latency",
                 color=server_colors[peer],
             )
-        # Graph estimated read/write latencies
-        write_latency_estimate = server_metrics["operation_latency.write_latency"]
-        read_latency_estimate = server_metrics["operation_latency.read_latency"]
-        axs[0].plot(
-            server_metrics.index[metric_skip:],
-            write_latency_estimate[metric_skip:],
-            linestyle="--",
-            label=f"Estimated write latency",
-            color="red",
-        )
-        axs[0].plot(
-            server_metrics.index[metric_skip:],
-            read_latency_estimate[metric_skip:],
-            linestyle="--",
-            label=f"Estimated read latency",
-            color="pink",
-        )
+        # # Graph estimated read/write latencies
+        # write_latency_estimate = server_metrics["operation_latency.write_latency"]
+        # read_latency_estimate = server_metrics["operation_latency.read_latency"]
+        # axs[0].plot(
+        #     server_metrics.index[metric_skip:],
+        #     write_latency_estimate[metric_skip:],
+        #     linestyle="--",
+        #     label=f"Estimated write latency",
+        #     color="red",
+        # )
+        # axs[0].plot(
+        #     server_metrics.index[metric_skip:],
+        #     read_latency_estimate[metric_skip:],
+        #     linestyle="--",
+        #     label=f"Estimated read latency",
+        #     color="pink",
+        # )
         # Graph workload metrics
         for server in servers_data.keys():
             a = server_metrics["cluster_metrics.workload"].apply(
@@ -767,6 +761,127 @@ def graph_average_latency_comparison_base(
     fig.legend(**legend_args)
     return fig, axs
 
+def graph_average_latency_comparison_all(
+    autoquorum_experiment_dir: str,
+    other_experiments: list[tuple[str, str]], # (name, dir)
+    experiment_labels: dict[str, str],
+    legend_args: dict,
+    multileader_experiment: str | None = None,
+):
+    clients_data, _, strategy_data = get_experiment_data(autoquorum_experiment_dir)
+    # Go from UTC time to experiment time
+    epoch_start = pd.Timestamp("20180606")
+    all_requests = pd.concat(clients_data.values())
+    start = min(all_requests.index)
+    for client_data in clients_data.values():
+        client_data.index = epoch_start + (client_data.index - start)
+    strategy_data.index = epoch_start + (strategy_data.index - start)
+    all_requests = pd.concat(clients_data.values())
+    print_strats(strategy_data)
+
+    # Plot AutoQuorum data
+    fig, axs = create_base_figure("", clients_data, strategy_data)
+    # Moving average latency
+    average_latency = all_requests["response_latency"].resample("3s").mean()
+    axs[0].plot(
+        average_latency.index,
+        average_latency.values,
+        linestyle="-",
+        label="AutoQuorum",
+        # marker=strat_markers["AutoQuorum"],
+        color=strat_colors["AutoQuorum"],
+        linewidth=2,
+    )
+    # Graph strat changes on latency line
+    for change_time, strat_change in strategy_data[strategy_data["reconfigure"]].iterrows():
+        for window in average_latency.rolling(2):
+            if window.notnull().sum() != 2:
+                continue
+
+            start = window.index[0]
+            end = window.index[1]
+
+            # Ensure that start <= change_time <= end
+            if start <= change_time <= end:
+                start_value = window.iloc[0]
+                end_value = window.iloc[1]
+
+                # Calculate the interpolated y value
+                time_difference = (end - start).total_seconds()
+                fraction = (change_time - start).total_seconds() / time_difference
+                interpolated_y = start_value + (end_value - start_value) * fraction
+
+                # Plot the strat change dot
+                new_leader = int(strat_change["opt_strat.leader"])
+                color = server_colors[new_leader]
+                axs[0].plot(change_time, interpolated_y, "o", color=color)
+    # # Graph strat changes on latency line
+    # for change_time, strat_change in strategy_data[strategy_data["reconfigure"]].iterrows():
+    #     for window in average_latency.rolling(2):
+    #         if window.notnull().sum() != 2:
+    #             continue
+    #         start = window.index[0]
+    #         end = window.index[1]
+    #         if start <= change_time <= end:
+    #             start_value = window.iloc[0]
+    #             value_difference = window.iloc[1] - start_value
+    #             interpolated_y = (
+    #                 start_value
+    #                 + value_difference * (change_time - start).total_seconds()
+    #             )
+    #             new_leader = int(strat_change["opt_strat.leader"])
+    #             color = server_colors[new_leader]
+    #             axs[0].plot(change_time, interpolated_y, "o", color=color)
+
+    # Plot other experiment data
+    for (experiment_name, experiment_dir) in other_experiments:
+        experiment_clients_data, _, _ = get_experiment_data(experiment_dir)
+        all_requests_other = pd.concat(experiment_clients_data.values())
+        start = min(all_requests_other.index)
+        all_requests_other.index = epoch_start + (all_requests_other.index - start)
+        average_latency = all_requests_other["response_latency"].resample("3s").mean()
+        axs[0].plot(
+            average_latency.index,
+            average_latency,
+            linestyle="-",
+            label=experiment_labels[experiment_name],
+            color=strat_colors[experiment_name],
+            # marker=strat_markers[experiment_name],
+            linewidth=2,
+            # alpha=0.5,
+        )
+
+    # Plot MultiLeader experiment data
+    if multileader_experiment is not None:
+        multileader_clients_data, _, _ = get_experiment_data(multileader_experiment)
+        all_requests_multi = pd.concat(multileader_clients_data.values())
+        start = min(all_requests_multi.index)
+        all_requests_multi.index = epoch_start + (all_requests_multi.index - start)
+        multi_latency = all_requests_multi["response_latency"].resample("3s").mean()
+        axs[0].plot(
+            multi_latency.index,
+            multi_latency,
+            linestyle="-",
+            label="EPaxos fast path",
+            color=strat_colors["EPaxos fast path"],
+            # marker=strat_markers["EPaxos fast path"],
+            linewidth=2,
+            # alpha=0.5,
+        )
+        # # Slow path
+        # axs[0].plot(
+        #     multi_latency.index,
+        #     2 * multi_latency,
+        #     linestyle="--",
+        #     label="EPaxos slow path",
+        #     color=strat_colors["EPaxos slow path"],
+        #     # marker=strat_markers["EPaxos slow path"],
+        #     linewidth=2,
+        #     # alpha=0.5,
+        # )
+    # fig.legend(ncols=2, loc="upper center", bbox_to_anchor=(0.5, 1.0), frameon=False)
+    fig.legend(**legend_args)
+    fig.tight_layout()
 
 def graph_average_latency_comparison3(
     experiment_name: str,
@@ -919,71 +1034,28 @@ def get_averages(df: pd.DataFrame) -> tuple[float | None, float | None, float]:
 
 def graph_average_latency_bar_chart(
     fig,
-    experiment_name: str,
-    no_optimize_experiment_name: str,
-    labels: tuple[str, str] = ("with optimization", "without optimization"),
+    experiments_data: list[tuple[str, str, str]], # name, dir, label
 ):
-    clients_data, _, strategy_data = get_experiment_data(experiment_name)
-    clients_data_no_opt, _, _ = get_experiment_data(no_optimize_experiment_name)
-
-    # Combine client requests in experiment
-    all_requests = pd.concat(clients_data.values())
-    all_requests_no_opt = pd.concat(clients_data_no_opt.values())
-    opt_avg, opt_std = (get_averages(all_requests), get_std_devs(all_requests))
-    no_opt_avg, no_opt_std = (
-        get_averages(all_requests_no_opt),
-        get_std_devs(all_requests_no_opt),
-    )
-
     bar_group_labels = [
         "Write Latency\nAverage",
         "Read Latency\nAverage",
         "Total Latency\nAverage",
     ]
-    latency_means = {
-        labels[0]: (opt_avg, opt_std, opt_color),
-        labels[1]: (no_opt_avg, no_opt_std, no_opt_color),
-    }
+    latency_means = {}
+    print(experiments_data)
+    for strat, experiment_dir, label in experiments_data:
+        clients_data, _, _ = get_experiment_data(experiment_dir)
+        all_requests = pd.concat(clients_data.values())
+        avg = get_averages(all_requests)
+        std_dev = get_std_devs(all_requests)
+        if label == "EPaxos":
+            latency_means["EPaxos fast path"] = (avg, std_dev, strat_colors[strat], strat_hatches[strat])
+            slow_avg = (2 * a for a in avg)
+            slow_std_dev = (2 * s for s in std_dev)
+            latency_means["EPaxos slow path"] = (slow_avg, slow_std_dev, strat_colors["EPaxos slow path"], strat_hatches["EPaxos slow path"])
+        else:
+            latency_means[label] = (avg, std_dev, strat_colors[strat], strat_hatches[strat])
     create_base_barchart(fig, latency_means, bar_group_labels)
-
-
-def graph_average_latency_bar_chart3(
-    fig,
-    experiment_name: str,
-    experiment_name_no_opt: str,
-    experiment_name_no_opt2: str,
-    labels: tuple[str, str, str],
-):
-    clients_data, _, strategy_data = get_experiment_data(experiment_name)
-    clients_data_no_opt, _, _ = get_experiment_data(experiment_name_no_opt)
-    clients_data_no_opt2, _, _ = get_experiment_data(experiment_name_no_opt2)
-
-    # Combine client requests in experiment
-    all_requests = pd.concat(clients_data.values())
-    opt_avg, opt_std = (get_averages(all_requests), get_std_devs(all_requests))
-    all_requests_no_opt = pd.concat(clients_data_no_opt.values())
-    no_opt_avg, no_opt_std = (
-        get_averages(all_requests_no_opt),
-        get_std_devs(all_requests_no_opt),
-    )
-    all_requests_no_opt2 = pd.concat(clients_data_no_opt2.values())
-    no_opt2_avg, no_opt2_std = (
-        get_averages(all_requests_no_opt2),
-        get_std_devs(all_requests_no_opt2),
-    )
-
-    bar_group_labels = [
-        "Write Latency\nAverage",
-        "Read Latency\nAverage",
-        "Total Latency\nAverage",
-    ]
-    latency_means = {
-        labels[0]: (opt_avg, opt_std, opt_color),
-        labels[1]: (no_opt_avg, no_opt_std, no_opt_color),
-        labels[2]: (no_opt2_avg, no_opt2_std, no_opt2_color),
-    }
-    create_base_barchart(fig, latency_means, bar_group_labels)
-
 
 def graph_intro_bar_chart(
     title: str, legend_labels: tuple[str, str], bar_group_labels: tuple[str, str]
@@ -1012,11 +1084,10 @@ def graph_read_strats_bar_chart(
     experiment: str,
     strats: list[str],
     labels: list[str],
-    colors: list[str],
 ):
     latency_means = {}
     bar_group_labels = [""] * 5
-    for strat, label, color in zip(strats, labels, colors):
+    for strat, label in zip(strats, labels):
         experiment_name = experiment + "/" + strat
         clients_data, _, _ = get_experiment_data(experiment_name)
         strat_avgs = [0.0] * 5
@@ -1028,7 +1099,7 @@ def graph_read_strats_bar_chart(
             strat_avgs[client - 1] = read_avg
             strat_stds[client - 1] = read_std
             bar_group_labels[client - 1] = location
-        latency_means[label] = (strat_avgs, strat_stds, color)
+        latency_means[label] = (strat_avgs, strat_stds, strat_colors[strat], strat_hatches[strat])
     create_base_barchart(fig, latency_means, bar_group_labels, error_bars=True)
 
 
@@ -1063,6 +1134,7 @@ def graph_round_robin_bench():
         experiment_name, experiment_name_no_opt, title, labels
     )
 
+
 def graph_round_robin_bench_w_multileader():
     experiment_directory = "round-robin-w-multileader"
     experiment_name = experiment_directory + "/autoquorum"
@@ -1073,106 +1145,77 @@ def graph_round_robin_bench_w_multileader():
     # graph_cluster_latency(experiment_name)
     # graph_optimization_comparison(experiment_name, experiment_name_no_opt)
     title = "Round Robin Benchmark"
-    labels = ("AutoQuorum", "Static Madrid Leader", "MultiLeader")
+    labels = {"AutoQuorum": "AutoQuorum", "no_opt": "Static Madrid Leader", "no_opt2": "MultiLeader"}
+    colors = {"AutoQuorum": (autoquorum_color, autoquorum_marker), "no_opt": (wread_color, wread_marker), "no_opt2": (epaxos_color, epaxos_marker)}
     legend_args = {
         "loc": "upper left",
-        "bbox_to_anchor": (0.09, 0.99),
+        "bbox_to_anchor": (0.095, 0.5),
+        "fontsize": 12,
+        "ncols": 2,
+        "frameon": False,
+    }
+    graph_average_latency_comparison_all(
+        experiment_name,
+        [("no_opt", experiment_name_no_opt)],#, ("no_opt2", experiment_name_no_opt2)],
+        labels,
+        colors,
+        legend_args,
+        multileader_experiment=experiment_name_no_opt2,
+    )
+    plt.savefig("logs/autoquorum-to-show/round-robin-3.svg", format="svg")
+    plt.show()
+    plt.close()
+    # graph_average_latency_bar_chart(
+    #     experiment_name, experiment_name_no_opt, title, labels
+    # )
+
+
+def graph_round_robin5_bench():
+    experiment_directory = "round-robin-5"
+    autoquorum_dir = experiment_directory + "/AutoQuorum"
+    baseline_dir = experiment_directory + "/Baseline"
+    multileader_dir = experiment_directory + "/MultiLeader-SuperMajority"
+    labels = {"AutoQuorum": "AutoQuorum", "Baseline": "Static LA Leader"}
+    legend_args = {
+        "loc": "upper left",
+        "bbox_to_anchor": (0.099, 0.99),
         "fontsize": 12,
         "ncols": 1,
+        "frameon": False,
     }
-    graph_average_latency_comparison3(
-        experiment_name,
-        experiment_name_no_opt,
-        experiment_name_no_opt2,
-        title,
+    graph_average_latency_comparison_all(
+        autoquorum_dir,
+        [("Baseline", baseline_dir)],
         labels,
-        legend_args
+        legend_args,
+        multileader_experiment=multileader_dir,
     )
-    graph_average_latency_bar_chart(
-        experiment_name, experiment_name_no_opt, title, labels
-    )
+    plt.savefig("logs/autoquorum-to-show/round-robin-5.svg", format="svg")
+    plt.show()
+    plt.close()
 
 
+
+def graph_shifting_conditions_debug():
+    period=1
+    opt="baseline"
+    opt="autoquorum"
+    experiment_dir = f"shifting-conditions/period-{period}/{opt}"
+    graph_server_data(experiment_dir)
 
 def graph_shifting_conditions_bench():
-    # experiment_directory = "shifting-conditions"
-    # experiment_name = experiment_directory + "/optimize-True"
-    # experiment_name_no_opt = experiment_directory + "/optimize-False"
-    # graph_server_data(experiment_name)
-    # graph_latency_estimation_comparison(experiment_name)
-    # graph_cluster_latency(experiment_name)
-    # graph_optimization_comparison(experiment_name, experiment_name_no_opt)
-    title = "Request Latency With and Without Optimization"
-    labels = ("AutoQuorum", "Static")  # Presentation Labels
-    legend_args = {
-        "loc": "upper left",
-        "bbox_to_anchor": (0.09, 0.99),
-        "fontsize": 12,
-        "ncols": 1,
-    }
-
-    # Stitch together periods into a single dataframe with continuous time
-    locations = {}
-    autoquorum_clients = {1:[], 2:[], 3:[], 4:[], 5:[]}
-    baseline_clients = {1:[], 2:[], 3:[], 4:[], 5:[]}
-    dummy_strat_data = pd.DataFrame()
-    epoch_start = pd.Timestamp("20180606")
-    for opt in ["autoquorum", "baseline"]:
-        period_time = epoch_start
-        # for period in [1, 2, 3, 4]:
-        for period in [1, 2, 4]:
-            experiment_dir = f"shifting-conditions/period-{period}/{opt}"
-            clients_data, _, strategy_data = get_experiment_data(experiment_dir)
-            period_dur = pd.Timedelta(
-                seconds=clients_data[1].attrs["requests"][0]["duration_sec"]
-            )
-
-            requests = pd.concat(clients_data.values())
-            period_start = min(requests.index)
-            for id, data in clients_data.items():
-                data.index = period_time + (data.index - period_start)
-                if opt == "baseline":
-                    baseline_clients[id].append(data)
-                else:
-                    autoquorum_clients[id].append(data)
-                    locations[id] = data.attrs
-            if len(dummy_strat_data) == 0:
-                strategy_data.index = period_time + (strategy_data.index - period_start)
-                dummy_strat_data = strategy_data
-            period_time += period_dur
-
-    autoquorum_clients = {k:pd.concat(v) for k, v in autoquorum_clients.items()}
-    baseline_clients = {k:pd.concat(v) for k, v in baseline_clients.items()}
-    for id, df in autoquorum_clients.items():
-        df.attrs = locations[id]
-    for id, df in baseline_clients.items():
-        df.attrs = locations[id]
-    fig, axs = graph_average_latency_comparison_base(autoquorum_clients, baseline_clients, dummy_strat_data)
-    plt.show()
-def graph_shifting_conditions_bench2():
-    # experiment_directory = "shifting-conditions"
-    # experiment_name = experiment_directory + "/optimize-True"
-    # experiment_name_no_opt = experiment_directory + "/optimize-False"
-    # graph_server_data(experiment_name)
-    # graph_latency_estimation_comparison(experiment_name)
-    # graph_cluster_latency(experiment_name)
-    # graph_optimization_comparison(experiment_name, experiment_name_no_opt)
-    title = "Request Latency With and Without Optimization"
-    labels = ("AutoQuorum", "Static")  # Presentation Labels
-    legend_args = {
-        "loc": "upper left",
-        "bbox_to_anchor": (0.09, 0.99),
-        "fontsize": 12,
-        "ncols": 1,
-    }
-
     # Stitch together periods into a single dataframe with continuous time
     all_data = []
     epoch_start = pd.Timestamp("20180606")
-    for opt in ["autoquorum", "baseline", "multileader"]:
+    for opt in [
+        "baseline",
+        "autoquorum",
+        "multileader-supermajority",
+        "multileader-majority",
+    ]:
         period_time = epoch_start
-        for period in [1, 2, 3, 4]:
-        # for period in [1, 2, 4]:
+        # for period in [1, 2, 3, 4]:
+        for period in [1, 2, 4]:
             experiment_dir = f"shifting-conditions/period-{period}/{opt}"
             clients_data, _, _ = get_experiment_data(experiment_dir)
             period_dur = pd.Timedelta(
@@ -1190,35 +1233,85 @@ def graph_shifting_conditions_bench2():
     df = pd.concat(all_data)
     df.dropna(inplace=True)
 
-    # Resample data to 1-second intervals, computing the mean response_latency
-    resampled = df.groupby("cluster_type").resample("1s").mean(numeric_only=True)
-    # Reset the index to simplify plotting
-    resampled = resampled.reset_index()
-    # Create the plot
     plt.figure(figsize=(10, 6))
-    # Loop through each cluster_type and plot the data
+    resampled = df.groupby("cluster_type").resample("1000ms").mean(numeric_only=True)
+    cluster_type_colors = {
+        "baseline": "tab:blue",
+        "autoquorum": "tab:orange",
+    }
+    cluster_type_labels = {
+        "baseline": "Baseline",
+        "autoquorum": "AutoQuorum",
+    }
     for cluster_type, group in resampled.groupby("cluster_type"):
-        plt.plot(group.index, group["response_latency"], label=cluster_type)
-    # Add labels, legend, and title
-    plt.xlabel("Request Time")
-    plt.ylabel("Response Latency")
-    plt.title("Response Latency Over Time by Cluster Type (1-Second Resampling)")
-    plt.legend(title="Cluster Type")
-    plt.grid(True)
+        request_times = group.index.get_level_values("request_time")
+        response_latency = group["response_latency"]
+        if cluster_type == "multileader-majority":
+            continue
+            plt.plot(
+                request_times,
+                response_latency,
+                label="EPaxos fast path",
+                linewidth=2,
+                color=strat_colors["EPaxos fast path"],
+            )
+            plt.plot(
+                request_times,
+                2 * response_latency,
+                label="EPaxos slow path",
+                linewidth=2,
+                linestyle="--",
+                color=strat_colors["EPaxos slow path"],
+            )
+        elif cluster_type == "multileader-supermajority":
+            plt.plot(
+                request_times,
+                response_latency,
+                label="EPaxos fast path",
+                linewidth=2,
+                color=strat_colors["EPaxos fast path"],
+            )
+            # plt.plot(
+            #     request_times,
+            #     response_latency,
+            #     label="FPaxos fast path",
+            #     linewidth=2,
+            #     color="tab:purple",
+            # )
+        else:
+            plt.plot(
+                request_times,
+                response_latency,
+                label=cluster_type_labels[cluster_type],
+                linewidth=2,
+                color=cluster_type_colors[cluster_type],
+            )
+    # # Estimate Fast Paxos
+    # multileader_data = resampled.loc[
+    #     ["multileader-majority", "multileader-supermajority"], :
+    # ]
+    # fpaxos_worst_case = multileader_data.groupby("request_time")[
+    #     "response_latency"
+    # ].sum()
+    # print(fpaxos_worst_case)
+    # plt.plot(
+    #     fpaxos_worst_case.index,
+    #     fpaxos_worst_case,
+    #     label="FPaxos slow path",
+    #     linewidth=2,
+    #     color="tab:purple",
+    #     linestyle="--",
+    # )
 
-    # Show the plot
+    plt.xlabel("Experiment Time", fontsize=12)
+    plt.ylabel("Average Request Latency (ms)", fontsize=12)
+    plt.ylim(bottom=0)
+    # plt.xlim(right=df.index.max())
+    plt.legend(ncols=2, loc="upper center", bbox_to_anchor=(0.5, 1.12), frameon=False)
     plt.tight_layout()
+    plt.savefig("logs/autoquorum-to-show/shifting-conditions.svg", format="svg")
     plt.show()
-
-    # autoquorum_clients = {k:pd.concat(v) for k, v in autoquorum_clients.items()}
-    # baseline_clients = {k:pd.concat(v) for k, v in baseline_clients.items()}
-    # for id, df in autoquorum_clients.items():
-    #     df.attrs = locations[id]
-    # for id, df in baseline_clients.items():
-    #     df.attrs = locations[id]
-    # fig, axs = graph_average_latency_comparison_base(autoquorum_clients, baseline_clients, dummy_strat_data)
-    # plt.show()
-
+    plt.close()
 
 
 def graph_shifting_load_bench():
@@ -1305,37 +1398,13 @@ def graph_read_ratio_bench():
         legend_args=legend_args,
     )
 
-
-# def graph_intro_bench():
-#     experiment_directory = "intro-d"
-#     experiment_name = experiment_directory + "/opt"
-#     # graph_server_data(experiment_name)
-#     # graph_latency_estimation_comparison(experiment_name)
-#     # graph_cluster_latency(experiment_name)
-#     # graph_optimization_comparison(experiment_name, experiment_name_no_opt)
-#     # legend_labels = ("StaticConfig: Leader=Dallas\n                     Quorum=Majority", "Optimal Configuration")
-#     legend_labels = (
-#         "Optimal Configuration",
-#         "Static Configuration",
-#     )  # Presentation labels
-#     bar_group_labels = ("Hotspot\nShift", "Node\nFailure")
-#     graph_intro_bar_chart("", legend_labels, bar_group_labels)
-#     # legend_labels = ("StaticConfig: Leader=N. Virginia\n                     Quorum=Majority", "Optimal Configuration")
-#     legend_labels = (
-#         "Optimal Configuration",
-#         "Static Configuration",
-#     )  # Presentation labels
-#     legend_args = {"loc": "upper right", "ncols": 1, "fontsize": 14}
-#     graph_average_latency_bar_chart(
-#         "intro-d-2/opt", "intro-d-2/baseline", "", legend_labels, legend_args
-#     )
-
-
 def graph_read_strats_bench():
-    experiment_directory = "read-strats-test"
-    experiment_name = experiment_directory + "/BallotRead"
-    experiment_name_no_opt = experiment_directory + "/QuorumRead"
-    experiment_name_no_opt2 = experiment_directory + "/ReadAsWrite"
+    experiment_directory = "read-strats"
+    bread_dir = experiment_directory + "/BallotRead"
+    qread_dir = experiment_directory + "/QuorumRead"
+    wread_dir = experiment_directory + "/ReadAsWrite"
+    autoquorum_dir = experiment_directory + "/AutoQuorum"
+    epaxos_dir = experiment_directory + "/EPaxos"
     # # graph_server_data(experiment_name)
     # # graph_latency_estimation_comparison(experiment_name)
     # # graph_cluster_latency(experiment_name)
@@ -1345,21 +1414,23 @@ def graph_read_strats_bench():
     # Overview bar chart
     fig, ax = plt.subplots(layout="constrained", figsize=(10, 6))
     fig.suptitle(f"Read Strategy Effect on 90% Read Ratio Workload")
-    # labels = ("[D, (2,4), BQR]", "[D, (2,4), QuorumRead]", "[NV, (4,2), RAW]")
-    labels = (
-        "Read-optimized Strat w/ BQR",
-        "Read-optimized Strat w/ Quorum Read",
-        "Write-optimized Strat",
+    experiment_data = [
+        # ("BallotRead", bread_dir, "[D, (2,4), DQR]"),
+        # ("QuorumRead", qread_dir, "[D, (2,4), QuorumRead]"),
+        # ("ReadAsWrite", wread_dir, "[D, (4,2), RAW]"),
+        ("AutoQuorum", autoquorum_dir, "AutoQuorum"),
+        ("EPaxos", epaxos_dir, "EPaxos"),
+    ]
+    # labels = ["Read-optimized Strat w/ DQR", "Read-optimized Strat w/ Quorum Read", "Write-optimized Strat"]
+    graph_average_latency_bar_chart(ax, experiment_data)
+    ax.legend(
+        loc="lower center",
+        bbox_to_anchor=(0.5, 1.02),
+        ncol=3,
+        borderaxespad=0,
+        frameon=False,
     )
-    graph_average_latency_bar_chart3(
-        ax,
-        experiment_name,
-        experiment_name_no_opt,
-        experiment_name_no_opt2,
-        labels,
-    )
-    # ax.legend(loc="upper left", ncols=1, fontsize=16)
-    ax.legend(loc='lower center', bbox_to_anchor=(0.5, 1.02), ncol=3, borderaxespad=0, frameon=False)
+    plt.savefig("logs/autoquorum-to-show/read-strats-overview.svg", format="svg")
     plt.show()
     plt.close()
 
@@ -1367,125 +1438,424 @@ def graph_read_strats_bench():
     fig, ax = plt.subplots(layout="constrained", figsize=(10, 6))
     fig.suptitle(f"Read Strategy Effect on 90% Read Ratio Workload")
     strats = ["BallotRead", "QuorumRead"]
-    colors = ["tab:orange", "tab:blue"]
-    graph_read_strats_bar_chart(ax, experiment_directory, strats, list(labels), colors)
-    ax.legend(loc='lower center', bbox_to_anchor=(0.5, 1.02), ncol=2, borderaxespad=0, frameon=False)
-    plt.show()
-
-
-def graph_read_strats_over_workload():
-    fig, axs = plt.subplots(5, 1, layout="constrained", figsize=(10, 6), sharex=True)
-    fig.suptitle(f"Read Strategy Effect on 90% Read Ratio With Increasing US Workload skew")
-    # labels = ("[D, (2,4), BQR]", "[D, (2,4), QuorumRead]", "[NV, (4,2), RAW]")
-    labels = (
-        "Read-optimized Strat w/ BQR",
-        "Read-optimized Strat w/ Quorum Read",
-        "Write-optimized Strat",
+    labels = ["[D, (2,4), DQR]", "[D, (2,4), QuorumRead]"]
+    graph_read_strats_bar_chart(ax, experiment_directory, strats, list(labels))
+    ax.legend(
+        loc="lower center",
+        bbox_to_anchor=(0.5, 1.02),
+        ncol=2,
+        borderaxespad=0,
+        frameon=False,
     )
-    for i, hotspot in enumerate([10, 30, 50, 70, 90]):
-        experiment_directory = f"read-strats/hotspot-{hotspot}"
-        experiment_name = experiment_directory + "/BallotRead"
-        experiment_name_no_opt = experiment_directory + "/QuorumRead"
-        experiment_name_no_opt2 = experiment_directory + "/ReadAsWrite"
-        graph_average_latency_bar_chart3(
-            axs[i],
-            experiment_name,
-            experiment_name_no_opt,
-            experiment_name_no_opt2,
-            labels,
-        )
-    axs[0].legend(loc='lower center', bbox_to_anchor=(0.5, 1.02), ncol=3, borderaxespad=0, frameon=False)
-    # axs[0].legend(loc="center left", bbox_to_anchor=(1, 0.5))
+    plt.savefig("logs/autoquorum-to-show/read-strats-breakdown.svg", format="svg")
     plt.show()
+    plt.close()
 
-def graph_read_strats_over_ratio():
-    fig, axs = plt.subplots(5, 1, layout="constrained", figsize=(10, 6), sharex=True)
-    fig.suptitle(f"Read Strategy Effect With Increasing Read Ratio Workload")
-    # labels = ("[D, (2,4), BQR]", "[D, (2,4), QuorumRead]", "[NV, (4,2), RAW]")
-    labels = (
-        "Read-optimized Strat w/ BQR",
-        "Read-optimized Strat w/ Quorum Read",
-        "Write-optimized Strat",
-    )
-    for i, read_ratio in enumerate([0.1, 0.3, 0.5, 0.7, 0.9]):
-        experiment_directory = f"read-strats/ratio-{read_ratio}"
-        experiment_name = experiment_directory + "/BallotRead"
-        experiment_name_no_opt = experiment_directory + "/QuorumRead"
-        experiment_name_no_opt2 = experiment_directory + "/ReadAsWrite"
-        graph_average_latency_bar_chart3(
-            axs[i],
-            experiment_name,
-            experiment_name_no_opt,
-            experiment_name_no_opt2,
-            labels,
-        )
-    axs[0].legend(loc='lower center', bbox_to_anchor=(0.5, 1.02), ncol=3, borderaxespad=0, frameon=False)
-    plt.show()
+def graph_read_strats_over_workload(compare_protocols: bool = False):
+    if compare_protocols:
+        strats = ["AutoQuorum", "EPaxos", "QuorumRead"]
+    else:
+        strats = ["QuorumRead", "BallotRead", "ReadAsWrite", "AutoQuorum"]
+    labels = {"BallotRead": "DQR", "EPaxos": "EPaxos fast path"}
+    experiment_dir = "read-strats"
+    read_ratio_data = []
+    for read_ratio in [0.1, 0.3, 0.5, 0.7, 0.9]:
+        for strat in strats:
+            run_directory = experiment_dir + f"/read-ratio-{read_ratio}/{strat}"
+            clients_data, _, _ = get_experiment_data(run_directory)
+            all_clients = pd.concat(clients_data)
+            all_clients["read_ratio"] = read_ratio
+            all_clients["strat"] = labels.get(strat) or strat
+            read_ratio_data.append(all_clients)
+    ratio_df = pd.concat(read_ratio_data)
+    rates_data = []
+    slow_rates = {}
+    for load in [30, 90, 180, 210, 300]:
+    # for rate in [1, 3, 5, 7, 9]:
+        for strat in strats:
+            run_directory = experiment_dir + f"/total-load-{load}/{strat}"
+            clients_data, _, _ = get_experiment_data(run_directory)
+            all_clients = pd.concat(clients_data)
+            all_clients["load"] = load
+            all_clients["strat"] = labels.get(strat) or strat
+            if strat == "QuorumRead":
+                slow = (all_clients["response_latency"] > 50).sum()
+                slow_rates[load] = slow / all_clients["response_latency"].notna().sum()
+            rates_data.append(all_clients)
+    rates_df = pd.concat(rates_data)
+    hotspots_data = []
+    relative_us_loads = [0.5, 0.6, 0.7, 0.8, 0.9]
+    for hotspot in relative_us_loads:
+        for strat in strats:
+            run_directory = experiment_dir + f"/us-load-{hotspot}/{strat}"
+            clients_data, _, _ = get_experiment_data(run_directory)
+            for id, data in clients_data.items():
+                data["client"] = id
+            all_clients = pd.concat(clients_data.values())
+            all_clients["hotspot"] = hotspot
+            all_clients["strat"] = labels.get(strat) or strat
+            hotspots_data.append(all_clients)
+    hotspots_df = pd.concat(hotspots_data)
 
-def graph_read_strats_over_absolute_rate():
-    fig, axs = plt.subplots(5, 1, layout="constrained", figsize=(10, 6), sharex=True)
-    fig.suptitle(f"Read Strategy Effect With Increasing Concurrent Writes")
-    # labels = ("[D, (2,4), BQR]", "[D, (2,4), QuorumRead]", "[NV, (4,2), RAW]")
-    labels = (
-        "Read-optimized Strat w/ BQR",
-        "Read-optimized Strat w/ Quorum Read",
-        "Write-optimized Strat",
+    fig, axes = plt.subplots(
+        1, 3, figsize=(18, 6), constrained_layout=True, sharey=True
     )
-    for i, rate in enumerate([1, 3, 5, 7, 9]):
-        experiment_directory = f"read-strats/rate-{rate}"
-        experiment_name = experiment_directory + "/BallotRead"
-        experiment_name_no_opt = experiment_directory + "/QuorumRead"
-        experiment_name_no_opt2 = experiment_directory + "/ReadAsWrite"
-        graph_average_latency_bar_chart3(
-            axs[i],
-            experiment_name,
-            experiment_name_no_opt,
-            experiment_name_no_opt2,
-            labels,
+
+    # Response Latency vs. Read Ratio
+    grouped_ratio = (
+        ratio_df.groupby(["strat", "read_ratio"])["response_latency"]
+        .mean()
+        .reset_index()
+    )
+    for strat in grouped_ratio["strat"].unique():
+        strat_data = grouped_ratio[grouped_ratio["strat"] == strat]
+        if strat == "QuorumRead" and compare_protocols:
+            continue
+        if strat == "EPaxos fast path":
+            axes[0].plot(
+                strat_data["read_ratio"],
+                2 * strat_data["response_latency"],
+                label="EPaxos slow path",
+                linewidth=2,
+                linestyle="--",
+                marker=strat_markers["EPaxos slow path"],
+                color=strat_colors["EPaxos slow path"],
+            )
+        axes[0].plot(
+            strat_data["read_ratio"],
+            strat_data["response_latency"],
+            label=strat,
+            linewidth=2,
+            marker=strat_markers[strat],
+            color=strat_colors[strat],
         )
-    axs[0].legend(loc='lower center', bbox_to_anchor=(0.5, 1.02), ncol=3, borderaxespad=0, frameon=False)
+    axes[0].set_xlabel("Read Ratio")
+    axes[0].set_ylabel("Average Response Latency")
+    axes[0].set_ylim(bottom=0, top=145)
+    axes[0].grid(axis="y", linestyle="--")
+    axes[0].set_title("Response Latency vs. Read Ratio")
+
+    # Response Latency vs. Rate
+    grouped_rate = (
+        rates_df.groupby(["strat", "load"])["response_latency"].mean().reset_index()
+    )
+    for strat in grouped_rate["strat"].unique():
+        strat_data = grouped_rate[grouped_rate["strat"] == strat]
+        if strat == "QuorumRead" and compare_protocols:
+            continue
+        if strat == "EPaxos fast path":
+            axes[1].plot(
+                strat_data["load"].map(slow_rates),
+                2 * strat_data["response_latency"],
+                label="EPaxos slow path",
+                linewidth=2,
+                linestyle="--",
+                marker=strat_markers["EPaxos slow path"],
+                color=strat_colors["EPaxos slow path"],
+            )
+        axes[1].plot(
+            strat_data["load"].map(slow_rates),
+            strat_data["response_latency"],
+            label=strat,
+            linewidth=2,
+            marker=strat_markers[strat],
+            color=strat_colors[strat],
+        )
+    axes[1].set_xlabel("Concurrent Write Rate")
+    axes[1].grid(axis="y", linestyle="--")
+    axes[1].set_title("Response Latency vs. Concurrent Write Rate")
+    axes[1].tick_params(axis="y", which="both", length=0)
+    axes[1].legend(loc="upper center", ncol=3, frameon=False)
+
+    # Response Latency vs. Hotspot
+    grouped_rate = (
+        hotspots_df.groupby(["strat", "hotspot"])["response_latency"]
+        .mean()
+        .reset_index()
+    )
+    for strat in grouped_rate["strat"].unique():
+        strat_data = grouped_rate[grouped_rate["strat"] == strat]
+        if strat == "QuorumRead" and compare_protocols:
+            continue
+        if strat == "EPaxos fast path":
+            axes[2].plot(
+                strat_data["hotspot"],
+                2 * strat_data["response_latency"],
+                label="EPaxos slow path",
+                linewidth=2,
+                linestyle="--",
+                marker=strat_markers["EPaxos slow path"],
+                color=strat_colors["EPaxos slow path"],
+            )
+        axes[2].plot(
+            strat_data["hotspot"],
+            strat_data["response_latency"],
+            label=strat,
+            linewidth=2,
+            marker=strat_markers[strat],
+            color=strat_colors[strat],
+        )
+    axes[2].set_xlabel("Relative US Load")
+    axes[2].grid(axis="y", linestyle="--")
+    axes[2].set_title("Response Latency vs. US Hotspot")
+    axes[2].tick_params(axis="y", which="both", length=0)
+
+    # Show the plot
+    plt.tight_layout()
+    if compare_protocols:
+        plt.savefig("logs/autoquorum-to-show/read-strats-varied-protocol.svg", format="svg")
+    else:
+        plt.savefig("logs/autoquorum-to-show/read-strats-varied-strat.svg", format="svg")
     plt.show()
+    plt.close()
 
 
 def graph_mixed_strat_bench():
-    experiment_directory = "mixed-strat-no-rinse"
-    experiment_name = experiment_directory + "/opt"
-    experiment_name_no_opt = experiment_directory + "/raw"
-    experiment_name_no_opt2 = experiment_directory + "/bread"
+    experiment_directory = "mixed-strats"
+    mixed_dir = experiment_directory + "/Mixed"
+    wread_dir = experiment_directory + "/ReadAsWrite"
+    bread_dir = experiment_directory + "/BallotRead"
+    autoquorum_dir = experiment_directory + "/AutoQuorum"
+    epaxos_dir = experiment_directory + "/EPaxos"
     # graph_server_data(experiment_name_no_opt)
     # graph_latency_estimation_comparison(experiment_name)
     # graph_cluster_latency(experiment_name)
     # graph_optimization_comparison(experiment_name, experiment_name_no_opt)
     # graph_average_latency_comparison3(experiment_name, experiment_name_no_opt, experiment_name_no_opt2, title, labels)
-    title = "Global vs. Per-node Read Strategy Effect on 90-10 Read-Write Workload"
-    # labels = ("[LA, (4,2), MIX]", "[LA, (4,2), RAW]", "[LA, (4,2), BQR]")
-    labels = (
-        "Mixed Read Strategy",
-        "Only RAW Reads",
-        "Only BQR Reads",
-    )  # Presentation labels
-    legend_args = {
-        "loc": "upper left",
-        "ncols": 1,
-        "fontsize": 14,
-    }  # "bbox_to_anchor": (0.124, 0.88)}
-    graph_average_latency_bar_chart3(
-        experiment_name,
-        experiment_name_no_opt,
-        experiment_name_no_opt2,
-        title,
-        labels,
-        legend_args,
+
+    # Overview bar chart
+    fig, ax = plt.subplots(layout="constrained", figsize=(10, 7))
+    fig.suptitle("Global vs. Per-node Read Strategy Effect on 90-10 Read-Write Workload")
+    experiment_data = [
+        # ("Mixed", mixed_dir, "[LA, (4,2), MIX]"),
+        ("ReadAsWrite", wread_dir, "Only RAW reads"),# "[LA, (4,2), RAW]"),
+        ("BallotRead", bread_dir, "Only DQR reads"),#"[LA, (4,2), DQR]"),
+        ("AutoQuorum", autoquorum_dir, "AutoQuorum"),
+        # ("EPaxos", epaxos_dir, "EPaxos"),
+    ]
+    # labels = ("Mixed Read Strategy", "Only RAW Reads", "Only BQR Reads")
+    graph_average_latency_bar_chart(ax, experiment_data)
+    ax.legend(
+        loc="upper left",
+        ncols=1,
+        fontsize=14,
+        frameon=False,
     )
-    title = "Read Strategy Latency When Leader=LA, RQ=4, WQ=2"
-    # labels = ["[LA, (4,2), RAW]", "[LA, (4,2), BQR]"]
-    labels = ("Only RAW Reads", "Only BQR Reads")  # Presentation labels
-    strats = ["raw", "bread"]
-    colors = ["tab:blue", "tab:green"]
-    legend_args = {"loc": "upper left", "ncols": 1, "fontsize": 16}
-    graph_read_strats_bar_chart(
-        title, experiment_directory, strats, labels, colors, legend_args
+    plt.savefig("logs/autoquorum-to-show/mixed-strats-overview.svg", format="svg")
+    plt.show()
+    plt.close()
+
+    # Breakdown bar chart
+    fig, ax = plt.subplots(layout="constrained", figsize=(10, 6))
+    fig.suptitle("Read Strategy Latency When Leader=LA, RQ=4, WQ=2")
+    # labels = ["[LA, (4,2), RAW]", "[LA, (4,2), DQR]", "AutoQuorum"]
+    labels = ["Only RAW reads", "Only DQR reads", "AutoQuorum"]
+    strats = ["ReadAsWrite", "BallotRead", "AutoQuorum"]
+    graph_read_strats_bar_chart(ax, experiment_directory, strats, labels)
+    ax.legend(
+        loc="upper left",
+        ncols=1,
+        fontsize=14,
+        frameon=False,
     )
+    plt.savefig("logs/autoquorum-to-show/mixed-strats-breakdown.svg", format="svg")
+    plt.show()
+    plt.close()
+
+def graph_mixed_strats_over_workload(compare_protocols: bool = False):
+    if compare_protocols:
+        strats = ["AutoQuorum", "EPaxos"]
+    else:
+        strats = ["BallotRead", "Mixed", "ReadAsWrite", "AutoQuorum"]
+    labels = {"BallotRead": "DQR", "EPaxos": "EPaxos fast path"}
+    experiment_dir = "mixed-strats"
+    read_ratio_data = []
+    for read_ratio in [0.1, 0.3, 0.5, 0.7, 0.9]:
+        for strat in strats:
+            run_directory = experiment_dir + f"/read-ratio-{read_ratio}/{strat}"
+            clients_data, _, _ = get_experiment_data(run_directory)
+            all_clients = pd.concat(clients_data)
+            all_clients["read_ratio"] = read_ratio
+            all_clients["strat"] = labels.get(strat) or strat
+            read_ratio_data.append(all_clients)
+    ratio_df = pd.concat(read_ratio_data)
+
+    hotspots_data = []
+    relative_eu_loads = [0.5, 0.6, 0.7, 0.8, 0.9]
+    for hotspot in relative_eu_loads:
+        for strat in strats:
+            run_directory = experiment_dir + f"/eu-load-{hotspot}/{strat}"
+            clients_data, _, _ = get_experiment_data(run_directory)
+            for id, data in clients_data.items():
+                data["client"] = id
+            all_clients = pd.concat(clients_data.values())
+            all_clients["hotspot"] = hotspot
+            all_clients["strat"] = labels.get(strat) or strat
+            hotspots_data.append(all_clients)
+    hotspots_df = pd.concat(hotspots_data)
+
+    fig, axes = plt.subplots(
+        1, 2, figsize=(18, 6), constrained_layout=True, sharey=True
+    )
+
+    # Response Latency vs. Read Ratio
+    grouped_ratio = (
+        ratio_df.groupby(["strat", "read_ratio"])["response_latency"]
+        .mean()
+        .reset_index()
+    )
+    for strat in grouped_ratio["strat"].unique():
+        strat_data = grouped_ratio[grouped_ratio["strat"] == strat]
+        if strat == "EPaxos fast path":
+            axes[0].plot(
+                strat_data["read_ratio"],
+                2 * strat_data["response_latency"],
+                label="EPaxos slow path",
+                linewidth=2,
+                linestyle="--",
+                marker=strat_markers["EPaxos slow path"],
+                color=strat_colors["EPaxos slow path"],
+            )
+        axes[0].plot(
+            strat_data["read_ratio"],
+            strat_data["response_latency"],
+            label=strat,
+            linewidth=2,
+            marker=strat_markers[strat],
+            color=strat_colors[strat],
+        )
+    axes[0].set_xlabel("Read Ratio")
+    axes[0].set_ylabel("Mean Response Latency")
+    axes[0].set_ylim(bottom=0, top=160)
+    axes[0].grid(axis="y", linestyle="--")
+    axes[0].set_title("Response Latency vs. Read Ratio")
+
+    # Response Latency vs. Hotspot
+    grouped_rate = (
+        hotspots_df.groupby(["strat", "hotspot"])["response_latency"]
+        .mean()
+        .reset_index()
+    )
+    for strat in grouped_rate["strat"].unique():
+        strat_data = grouped_rate[grouped_rate["strat"] == strat]
+        if strat == "EPaxos fast path":
+            axes[1].plot(
+                strat_data["hotspot"],
+                2 * strat_data["response_latency"],
+                label="EPaxos slow path",
+                linewidth=2,
+                linestyle="--",
+                marker=strat_markers["EPaxos slow path"],
+                color=strat_colors["EPaxos slow path"],
+            )
+        axes[1].plot(
+            strat_data["hotspot"],
+            strat_data["response_latency"],
+            label=strat,
+            linewidth=2,
+            marker=strat_markers[strat],
+            color=strat_colors[strat],
+        )
+    axes[1].set_xlabel("Relative EU Load")
+    axes[1].grid(axis="y", linestyle="--")
+    axes[1].set_title("Response Latency vs. EU Load")
+    axes[1].tick_params(axis="y", which="both", length=0)
+    axes[1].legend(loc="upper left", ncol=2, frameon=False)
+
+    # Show the plot
+    plt.tight_layout()
+    if compare_protocols:
+        plt.savefig("logs/autoquorum-to-show/mixed-strats-varied-protocol.svg", format="svg")
+    else:
+        plt.savefig("logs/autoquorum-to-show/mixed-strats-varied-strats.svg", format="svg")
+    plt.show()
+    plt.close()
+
+
+def graph_even_load_bench():
+    # experiment_directory = "even-load"
+    # aq_data = experiment_directory + "/AutoQuorum"
+    # clients_data, _, _ = get_experiment_data(aq_data)
+    # aq_df = pd.concat(clients_data)
+    # maj_data = experiment_directory + "/MultiLeader-Majority"
+    # clients_data, _, _ = get_experiment_data(maj_data)
+    # maj_df = pd.concat(clients_data)
+    # super_maj_data = experiment_directory + "/MultiLeader-SuperMajority"
+    # clients_data, _, _ = get_experiment_data(super_maj_data)
+    # super_maj_df = pd.concat(clients_data)
+    #
+    # a = aq_df["response_latency"].mean()
+    # b = maj_df["response_latency"].mean()
+    # c = super_maj_df["response_latency"].mean()
+    # print(a,b,c)
+    # # Define conflict rate range (e.g., from 0 to 1 in increments of 0.1)
+    # conflict_rates = np.linspace(0, 1, 20)
+    #
+    # # Compute the dependent variable
+    # conflict_values = c + (conflict_rates * b)
+    #
+    # # Plot the graph
+    # plt.figure(figsize=(8, 5))
+    # plt.plot(conflict_rates, conflict_values, label="Epaxos", marker='o')
+    # plt.axhline(y=a, color='r', linestyle='--', label="AutoQuorum")
+    #
+    # # Labels and title
+    # plt.xlabel("Conflict Rate")
+    # plt.ylabel("Response Latency")
+    # plt.title("Response Latency vs Conflict Rate")
+    # plt.ylim(bottom=0)
+    # plt.legend()
+    # plt.grid(True)
+    #
+    # # Show the plot
+    # plt.show()
+    
+    experiment_directory = "even-load"
+    aq_data = experiment_directory + "/AutoQuorum"
+    aq_clients, _, _ = get_experiment_data(aq_data)
+    maj_data = experiment_directory + "/MultiLeader-Majority"
+    maj_clients, _, _ = get_experiment_data(maj_data)
+    super_maj_data = experiment_directory + "/MultiLeader-SuperMajority"
+    super_maj_clients, _, _ = get_experiment_data(super_maj_data)
+    latency_means = {}
+    bar_group_labels = [""] * len(aq_clients)
+    # AutoQuorum latencies
+    latencies = [0] * len(aq_clients)
+    stds = [None] * len(aq_clients)
+    leader = "us-east4-a"
+    for client, client_requests in aq_clients.items():
+        gcp_location = client_requests.attrs["location"]
+        location = location_name(gcp_location, gcp_location == leader)
+        aq_latency = client_requests["response_latency"].mean()
+        latencies[client-1] = aq_latency
+        bar_group_labels[client - 1] = location
+    latency_means["AutoQuorum"] = (latencies, stds, strat_colors["AutoQuorum"], strat_hatches["AutoQuorum"])
+    # EPaxos latencies
+    conflict_rates = np.linspace(0,1,3)
+    for conflict_rate in conflict_rates:
+        latencies = [0] * len(maj_clients)
+        stds = [None] * len(maj_clients)
+        for client in maj_clients.keys():
+            maj_latency = maj_clients[client]["response_latency"].mean()
+            super_maj_latency = super_maj_clients[client]["response_latency"].mean()
+            epaxos_latency = super_maj_latency + (conflict_rate * maj_latency)
+            latencies[client-1] = epaxos_latency
+        latency_means[f"EPaxos {conflict_rate}"] = (latencies, stds, str(1-conflict_rate), None)
+
+    for k,v in latency_means.items():
+        print(k, v)
+    fig, ax = plt.subplots(layout="constrained", figsize=(10, 6))
+    fig.suptitle("Even load benchmark", size=20)
+    create_base_barchart(ax, latency_means, bar_group_labels, error_bars=False)
+    ax.legend(
+        bbox_to_anchor=(0.5, 1.10),
+        loc='center',
+        ncol=len(conflict_rates) + 1,
+        fontsize=10,
+        frameon=False,
+    )
+    plt.show()
+    plt.close()
 
 
 def graph_test():
@@ -1503,28 +1873,32 @@ def graph_test():
 
 
 def main():
+    # Not used
     # graph_test()
     # graph_local_bench()
     # graph_round_robin_bench()
     # graph_round_robin_bench_w_multileader()
-     
-    # graph_shifting_conditions_bench()
-    # graph_shifting_conditions_bench2()
 
+    # graph_round_robin5_bench()
+    #
+    # graph_shifting_conditions_bench()
+    graph_shifting_conditions_debug()
+    #
     # graph_read_strats_bench()
     # graph_read_strats_over_workload()
-    # graph_read_strats_over_ratio()
-    graph_read_strats_over_absolute_rate()
+    # graph_read_strats_over_workload(compare_protocols=True)
+    #
+    # graph_mixed_strat_bench()
+    # graph_mixed_strats_over_workload()
+    # graph_mixed_strats_over_workload(compare_protocols=True)
+
+    # graph_even_load_bench()
 
 
-
+    # TODO
     # graph_shifting_load_bench()
-    # graph_dynamic_flex_bench()
     # graph_read_heavy_bench()
     # graph_read_ratio_bench()
-    # graph_intro_bench()
-    # graph_mixed_strat_bench()
-    # graph_reconfig_overhead_bench()
     pass
 
 
@@ -1534,8 +1908,69 @@ if __name__ == "__main__":
     opt_color = "tab:orange"
     no_opt_color = "tab:blue"
     no_opt2_color = "tab:green"
-    # opt_color = "tab:gray"
-    # no_opt_color = "tab:orange"
-    # no_opt2_color = "tab:blue"
-    bar_colors = (opt_color, no_opt_color, no_opt2_color)
+
+    autoquorum_color = "tab:orange"
+    wread_color = "tab:blue"
+    bread_color = "tab:green"
+    qread_color = "tab:purple"
+    mixed_color = "tab:cyan"
+    epaxos_color = "tab:gray"
+    epaxos_slow_color = "black"
+    # epaxos_slow_color = plt.colormaps.get_cmap("tab20")(7)
+    strat_colors = {
+        "AutoQuorum": autoquorum_color,
+        "Baseline": wread_color,
+        "ReadAsWrite": wread_color,
+        "RAW": wread_color,
+        "DQR": bread_color,
+        "BallotRead": bread_color,
+        "QuorumRead": qread_color,
+        "Mixed": mixed_color,
+        "EPaxos": epaxos_color,
+        "EPaxos fast path": epaxos_color,
+        "EPaxos slow path": epaxos_slow_color,
+    }
+
+    autoquorum_marker = "s"
+    wread_marker = "D"
+    bread_marker = "o"
+    qread_marker = "h"
+    mixed_marker = "X"
+    epaxos_marker = "^"
+    epaxos_slow_marker = "v"
+    strat_markers = {
+        "AutoQuorum": autoquorum_marker,
+        "Baseline": wread_marker,
+        "ReadAsWrite": wread_marker,
+        "RAW": wread_marker,
+        "DQR": bread_marker,
+        "BallotRead": bread_marker,
+        "QuorumRead": qread_marker,
+        "Mixed": mixed_marker,
+        "EPaxos": epaxos_marker,
+        "EPaxos fast path": epaxos_marker,
+        "EPaxos slow path": epaxos_slow_marker,
+    }
+
+    autoquorum_hatch = "x"
+    wread_hatch = "-"
+    bread_hatch = "/"
+    qread_hatch = "\\"
+    mixed_hatch = "+"
+    epaxos_hatch = "."
+    epaxos_slow_hatch = "o"
+    strat_hatches = {
+        "AutoQuorum": autoquorum_hatch,
+        "Baseline": wread_hatch,
+        "ReadAsWrite": wread_hatch,
+        "RAW": wread_hatch,
+        "DQR": bread_hatch,
+        "BallotRead": bread_hatch,
+        "QuorumRead": qread_hatch,
+        "Mixed": mixed_hatch,
+        "EPaxos": epaxos_hatch,
+        "EPaxos fast path": epaxos_hatch,
+        "EPaxos slow path": epaxos_slow_hatch,
+    }
+
     main()

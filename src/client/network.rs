@@ -3,6 +3,7 @@ use futures::{SinkExt, StreamExt};
 use log::*;
 use std::net::SocketAddr;
 use std::time::Duration;
+use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc::{self, channel};
 use tokio::task::JoinHandle;
 use tokio::{net::TcpStream, sync::mpsc::Receiver};
@@ -183,9 +184,21 @@ impl ServerConnection {
                     _ = cancel_token.cancelled() => {
                         // Try to empty outgoing message queue before exiting
                         while let Ok(msg) = message_rx.try_recv() {
-                            let _ = writer.feed(msg).await;
+                            if let Err(err) = writer.feed(msg).await {
+                                error!("Couldn't send message to server {server_id}: {err}");
+                                break;
+                            }
                         }
-                        let _ = writer.flush().await;
+                        if let Err(err) = writer.flush().await {
+                            error!("Couldn't send message to server {server_id}: {err}");
+                            break;
+                        }
+
+                        // Gracefully shut down the write half of the connection
+                        let mut underlying_socket = writer.into_inner().into_inner();
+                        if let Err(err) = underlying_socket.shutdown().await {
+                            error!("Error shutting down the stream to server {server_id}: {err}");
+                        }
                         break;
                     }
                 }
@@ -207,6 +220,6 @@ impl ServerConnection {
     }
 
     async fn wait_for_writes(self) {
-        let _ = self.writer_task.await;
+        let _ = tokio::time::timeout(Duration::from_secs(5), self.writer_task).await;
     }
 }

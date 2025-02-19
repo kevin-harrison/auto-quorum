@@ -434,7 +434,8 @@ impl ExperimentState {
     }
 
     fn is_finished(&self) -> bool {
-        self.node_states.iter().all(|s| *s == State::Done)
+        // self.node_states.iter().all(|s| *s == State::Done)
+        self.my_clients_are_finished()
     }
 
     fn is_killed(&self, node: NodeId) -> bool {

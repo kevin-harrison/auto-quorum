@@ -121,9 +121,11 @@ impl OmniPaxosServer {
                     }
                 },
                 _ = self.network.cluster_messages.recv_many(&mut cluster_msg_buf, NETWORK_BATCH_SIZE) => {
-                        self.handle_cluster_messages(&mut cluster_msg_buf).await;
-                    },
+                    debug!("{}: Cluster messages {}" , self.id, cluster_msg_buf.len());
+                    self.handle_cluster_messages(&mut cluster_msg_buf).await;
+                },
                 _ = self.network.client_messages.recv_many(&mut client_msg_buf, NETWORK_BATCH_SIZE) => {
+                    debug!("{}: Client messages {}" , self.id, client_msg_buf.len());
                     self.handle_client_messages(&mut client_msg_buf).await;
                 },
             }
@@ -342,11 +344,6 @@ impl OmniPaxosServer {
                 ClusterMessage::Done => self.handle_peer_done(from).await,
             }
         }
-        // TODO: check if its ok to delay the outgoing + decided
-        // if self.id == self.omnipaxos.get_current_leader().unwrap_or_default() {
-        //     self.handle_decided_entries();
-        // }
-        // self.send_outgoing_msgs();
     }
 
     fn handle_read_request(
@@ -581,7 +578,8 @@ impl ExperimentState {
     }
 
     fn is_finished(&self) -> bool {
-        self.node_states.iter().all(|s| *s == State::Done)
+        // self.node_states.iter().all(|s| *s == State::Done)
+        self.my_clients_are_finished()
     }
 
     fn is_killed(&self, node: NodeId) -> bool {

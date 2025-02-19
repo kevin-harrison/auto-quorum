@@ -127,7 +127,7 @@ class AutoQuorumCluster:
                 stopped_processes.append(client_id)
         return stopped_processes
 
-    def await_cluster(self, timeout: int | None = None):
+    def await_cluster(self, timeout: int | None = None, partitioned_node: int | None = None):
         """
         Waits for client and server processes to finish, retrying if SSH connection fails. Aborts processes if timeout (in seconds)
         is reached.
@@ -142,15 +142,32 @@ class AutoQuorumCluster:
         while True:
             a_process_failed = False
             a_process_is_running = False
-            all_processes = chain(
-                self._client_processes.values(), self._server_processes.values()
-            )
-            for process in all_processes:
-                return_code = process.poll()
+            for client_id, client_process in self._client_processes.items():
+                return_code = client_process.poll()
                 if return_code is None:
                     a_process_is_running = True
                 elif return_code == 255:
                     a_process_failed = True
+            for server_id, server_process in self._server_processes.items():
+                return_code = server_process.poll()
+                if return_code is None:
+                    # TODO: A server sometimes misses a kill message from the client
+                    # and thus never terminates
+                    if partitioned_node == server_id:
+                        continue
+                    a_process_is_running = True
+                elif return_code == 255:
+                    a_process_failed = True
+
+            # all_processes = chain(
+            #     self._client_processes.values(), self._server_processes.values()
+            # )
+            # for process in all_processes:
+            #     return_code = process.poll()
+            #     if return_code is None:
+            #         a_process_is_running = True
+            #     elif return_code == 255:
+            #         a_process_failed = True
 
             if a_process_failed:
                 stopped_clients = self.stop_clients()
@@ -178,10 +195,10 @@ class AutoQuorumCluster:
         self._client_processes.clear()
         self._server_processes.clear()
 
-    def run(self, logs_directory: Path):
-        self.start_servers()
-        self.start_clients()
-        self.await_cluster()
+    def run(self, logs_directory: Path, pull_images: bool = False, partitioned_node: int | None = None):
+        self.start_servers(pull_images=pull_images)
+        self.start_clients(pull_images=pull_images)
+        self.await_cluster(partitioned_node=partitioned_node)
         self.get_logs(logs_directory)
 
     def shutdown(self):

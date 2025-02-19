@@ -9,7 +9,10 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::sync::mpsc::{Sender, UnboundedSender};
+use tokio::{
+    io::AsyncWriteExt,
+    sync::mpsc::{Sender, UnboundedSender},
+};
 use tokio::{
     net::{TcpListener, TcpStream},
     sync::mpsc::Receiver,
@@ -340,9 +343,21 @@ impl PeerConnection {
                     _ = cancel_token.cancelled() => {
                         // Try to empty outgoing message queue before exiting
                         while let Ok(msg) = message_rx.try_recv() {
-                            let _ = writer.feed(msg).await;
+                            if let Err(err) = writer.feed(msg).await {
+                                error!("Couldn't send message to node {peer_id}: {err}");
+                                break;
+                            }
                         }
-                        let _ = writer.flush().await;
+                        if let Err(err) = writer.flush().await {
+                            error!("Couldn't send message to node {peer_id}: {err}");
+                            break;
+                        }
+
+                        // Gracefully shut down the write half of the connection
+                        let mut underlying_socket = writer.into_inner().into_inner();
+                        if let Err(err) = underlying_socket.shutdown().await {
+                            error!("Error shutting down the stream to node {peer_id}: {err}");
+                        }
                         break;
                     }
                 }
@@ -364,7 +379,7 @@ impl PeerConnection {
     }
 
     async fn wait_for_writes_and_shutdown(self) {
-        let _ = self.writer_task.await;
+        let _ = tokio::time::timeout(Duration::from_secs(5), self.writer_task).await;
     }
 }
 
