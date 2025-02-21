@@ -1,5 +1,5 @@
 use crate::{
-    configs::AutoQuorumServerConfig,
+    configs::AutoQuorumConfig,
     database::Database,
     metrics::{ClusterMetrics, MetricsHeartbeatServer},
     network::Network,
@@ -8,7 +8,7 @@ use auto_quorum::common::{kv::*, messages::*, utils::Timestamp};
 use chrono::Utc;
 use log::*;
 use omnipaxos::{
-    util::{FlexibleQuorum, LogEntry, NodeId},
+    util::{LogEntry, NodeId},
     OmniPaxos, OmniPaxosConfig,
 };
 use omnipaxos_storage::memory_storage::MemoryStorage;
@@ -36,44 +36,35 @@ pub struct MultiLeaderServer {
     strategy: ClusterStrategy,
     experiment_state: ExperimentState,
     output_file: File,
-    config: AutoQuorumServerConfig,
+    config: AutoQuorumConfig,
 }
 
 impl MultiLeaderServer {
-    pub async fn new(config: AutoQuorumServerConfig) -> Self {
+    pub async fn new(config: AutoQuorumConfig) -> Self {
         let mut omnipaxos_instances = vec![];
-        for _ in config.nodes.iter() {
+        for _ in config.cluster.nodes.iter() {
             let storage: MemoryStorage<Command> = MemoryStorage::default();
             let omnipaxos_config: OmniPaxosConfig = config.clone().into();
             let omnipaxos = omnipaxos_config.build(storage).unwrap();
             omnipaxos_instances.push(omnipaxos);
         }
-        let metrics_server = MetricsHeartbeatServer::new(config.server_id, config.nodes.clone());
-        let init_strat = ClusterStrategy::initial_strategy(config.clone());
-        let network = Network::new(
-            config.cluster_name.clone(),
-            config.server_id,
-            config.nodes.clone(),
-            config.num_clients,
-            config.local_deployment.unwrap_or(false),
-            NETWORK_BATCH_SIZE,
-        )
-        .await;
-        let output_file = File::create(config.output_filepath.clone()).unwrap();
+        let network = Network::new(config.clone(), NETWORK_BATCH_SIZE).await;
+        let output_file = File::create(config.server.output_filepath.clone()).unwrap();
         let mut server = MultiLeaderServer {
-            id: config.server_id,
+            id: config.server.server_id,
             peers: config
+                .cluster
                 .nodes
                 .iter()
                 .copied()
-                .filter(|n| *n != config.server_id)
+                .filter(|n| *n != config.server.server_id)
                 .collect(),
             database: Database::new(),
             network,
             omnipaxos_instances,
-            applied_indices: vec![0; config.nodes.len()],
-            metrics_server,
-            strategy: init_strat,
+            applied_indices: vec![0; config.cluster.nodes.len()],
+            metrics_server: MetricsHeartbeatServer::new(config.clone()),
+            strategy: ClusterStrategy::initial_strategy(config.clone()),
             experiment_state: ExperimentState::initial_state(config.clone()),
             output_file,
             config,
@@ -87,7 +78,7 @@ impl MultiLeaderServer {
 
     pub async fn run(&mut self) {
         self.start_log();
-        if self.config.num_clients == 0 {
+        if self.config.server.num_clients == 0 {
             self.experiment_state.node_finished(self.id);
             for peer in &self.peers {
                 let done_msg = MultiLeaderClusterMessage::Done;
@@ -318,7 +309,7 @@ impl MultiLeaderServer {
     }
 
     fn send_client_start_signals(&mut self, start_time: Timestamp) {
-        for client_id in 1..self.config.num_clients as ClientId + 1 {
+        for client_id in 1..self.config.server.num_clients as ClientId + 1 {
             debug!("Sending start message to client {client_id}");
             let msg = ServerMessage::StartSignal(start_time);
             self.network.send_to_client(client_id, msg);
@@ -408,9 +399,9 @@ enum State {
 }
 
 impl ExperimentState {
-    fn initial_state(config: AutoQuorumServerConfig) -> Self {
-        let node_states = vec![State::Running; config.nodes.len()];
-        let client_states = vec![State::Running; config.num_clients];
+    fn initial_state(config: AutoQuorumConfig) -> Self {
+        let node_states = vec![State::Running; config.cluster.nodes.len()];
+        let client_states = vec![State::Running; config.server.num_clients];
         ExperimentState {
             node_states,
             client_states,
@@ -466,15 +457,15 @@ pub struct ClusterStrategy {
 }
 
 impl ClusterStrategy {
-    pub fn initial_strategy(config: AutoQuorumServerConfig) -> Self {
-        let num_nodes = config.nodes.len();
-        let init_read_quorum = match config.initial_flexible_quorum {
+    pub fn initial_strategy(config: AutoQuorumConfig) -> Self {
+        let num_nodes = config.cluster.nodes.len();
+        let init_read_quorum = match config.cluster.initial_flexible_quorum {
             Some(flex_quroum) => flex_quroum.read_quorum_size,
             None => num_nodes / 2 + 1,
         };
         let init_read_strat = vec![ReadStrategy::ReadAsWrite; num_nodes];
         Self {
-            leader: config.server_id,
+            leader: config.server.server_id,
             read_quorum_size: init_read_quorum,
             write_quorum_size: num_nodes - init_read_quorum + 1,
             read_strategies: init_read_strat,

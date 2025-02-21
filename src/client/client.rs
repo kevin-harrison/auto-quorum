@@ -1,25 +1,10 @@
-use crate::{data_collection::ClientData, network::Network};
-use auto_quorum::common::{kv::*, messages::*, utils::Timestamp};
+use crate::{configs::ClientConfig, data_collection::ClientData, network::Network};
+use auto_quorum::common::{kv::*, messages::*};
 use chrono::Utc;
 use log::*;
 use rand::Rng;
-use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use tokio::time::interval;
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct ClientConfig {
-    pub cluster_name: String,
-    pub location: String,
-    pub server_id: NodeId,
-    pub requests: Vec<RequestInterval>,
-    pub local_deployment: Option<bool>,
-    pub kill_signal_sec: Option<u64>,
-    pub next_server: Option<NodeId>,
-    pub sync_time: Option<Timestamp>,
-    pub summary_filepath: String,
-    pub output_filepath: String,
-}
 
 const NETWORK_BATCH_SIZE: usize = 100;
 
@@ -35,15 +20,8 @@ pub struct Client {
 
 impl Client {
     pub async fn new(config: ClientConfig) -> Self {
-        let local_deployment = config.local_deployment.unwrap_or(false);
-        let server_ids = match config.next_server {
-            Some(next_server) => vec![config.server_id, next_server],
-            None => vec![config.server_id],
-        };
         let network = Network::new(
-            config.cluster_name.clone(),
-            server_ids,
-            local_deployment,
+            vec![(config.server_id, config.server_address.clone())],
             NETWORK_BATCH_SIZE,
         )
         .await;
@@ -65,17 +43,14 @@ impl Client {
             self.save_results().expect("Failed to save results");
             return;
         }
-        match (self.config.kill_signal_sec, self.config.next_server) {
-            (Some(0), None) => {
-                info!("{}: Sending kill signal to {}", self.id, self.active_server);
-                let kill_msg = ClientMessage::Kill;
-                self.network.send(self.active_server, kill_msg).await;
-                tokio::time::sleep(Duration::from_secs(5)).await;
-                self.network.shutdown().await;
-                self.save_results().expect("Failed to save results");
-                return;
-            }
-            _ => (),
+        if let Some(0) = self.config.kill_signal_sec {
+            info!("{}: Sending kill signal to {}", self.id, self.active_server);
+            let kill_msg = ClientMessage::Kill;
+            self.network.send(self.active_server, kill_msg).await;
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            self.network.shutdown().await;
+            self.save_results().expect("Failed to save results");
+            return;
         }
 
         // Wait for server to signal start
@@ -135,14 +110,10 @@ impl Client {
                 // responses to wait for is undefined.
                 _ = async { kill_signal.as_mut().unwrap().await }, if kill_signal.is_some() => {
                     info!("{}: Sending kill signal to {}", self.id, self.active_server);
-                    kill_signal = None;
                     let kill_msg = ClientMessage::Kill;
                     // TODO: should cleanup connection task here
                     self.network.send(self.active_server, kill_msg).await;
-                    match self.config.next_server {
-                        Some(next_server) => self.active_server = next_server,
-                        None => break,
-                    }
+                    break;
                 }
             }
         }
@@ -152,7 +123,7 @@ impl Client {
             self.id,
             self.client_data.response_count(),
         );
-        if self.config.kill_signal_sec.is_none() || self.config.next_server.is_some() {
+        if self.config.kill_signal_sec.is_none() {
             // Still connected to an active server
             info!("{}: Sending done signal to {}", self.id, self.active_server);
             self.network
@@ -220,27 +191,5 @@ impl Client {
         self.client_data
             .to_csv(self.config.output_filepath.clone())?;
         Ok(())
-    }
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone, Copy)]
-pub struct RequestInterval {
-    duration_sec: u64,
-    requests_per_sec: u64,
-    read_ratio: f64,
-}
-
-impl RequestInterval {
-    fn get_interval_duration(self) -> Duration {
-        Duration::from_secs(self.duration_sec)
-    }
-
-    fn get_request_delay(self) -> Duration {
-        if self.requests_per_sec == 0 {
-            return Duration::from_secs(999999);
-        }
-        let delay_ms = 1000 / self.requests_per_sec;
-        assert!(delay_ms != 0);
-        Duration::from_millis(delay_ms)
     }
 }

@@ -1,5 +1,5 @@
 use crate::{
-    configs::AutoQuorumServerConfig,
+    configs::AutoQuorumConfig,
     database::Database,
     metrics::{ClusterMetrics, MetricsHeartbeatServer},
     network::Network,
@@ -26,6 +26,7 @@ type OmniPaxosInstance = OmniPaxos<Command, MemoryStorage<Command>>;
 const NETWORK_BATCH_SIZE: usize = 100;
 const LEADER_WAIT: Duration = Duration::from_secs(1);
 const OPTIMIZE_TIMEOUT: Duration = Duration::from_secs(1);
+const DEFAULT_OPTIMIZE_THRESHOLD: f64 = 0.8;
 
 pub struct OmniPaxosServer {
     id: NodeId,
@@ -41,51 +42,40 @@ pub struct OmniPaxosServer {
     optimize_threshold: f64,
     experiment_state: ExperimentState,
     output_file: File,
-    config: AutoQuorumServerConfig,
+    config: AutoQuorumConfig,
 }
 
 impl OmniPaxosServer {
-    pub async fn new(config: AutoQuorumServerConfig) -> Self {
-        let init_strat = ClusterStrategy::initial_strategy(config.clone());
+    pub async fn new(config: AutoQuorumConfig) -> Self {
         let storage: MemoryStorage<Command> = MemoryStorage::default();
         let omnipaxos_config: OmniPaxosConfig = config.clone().into();
         let omnipaxos = omnipaxos_config.build(storage).unwrap();
-        let metrics_server = MetricsHeartbeatServer::new(config.server_id, config.nodes.clone());
-        let optimizer = ClusterOptimizer::new(config.nodes.clone());
-        let network = Network::new(
-            config.cluster_name.clone(),
-            config.server_id,
-            config.nodes.clone(),
-            config.num_clients,
-            config.local_deployment.unwrap_or(false),
-            NETWORK_BATCH_SIZE,
-        )
-        .await;
-        let output_file = File::create(config.output_filepath.clone()).unwrap();
-        let mut server = OmniPaxosServer {
-            id: config.server_id,
+        let network = Network::new(config.clone(), NETWORK_BATCH_SIZE).await;
+        let output_file = File::create(config.server.output_filepath.clone()).unwrap();
+        OmniPaxosServer {
+            id: config.server.server_id,
             database: Database::new(),
             network,
             omnipaxos,
             current_decided_idx: 0,
-            quorum_reader: QuorumReader::new(config.server_id),
-            metrics_server,
-            optimizer,
-            strategy: init_strat,
-            optimize: config.optimize.unwrap_or(true),
-            optimize_threshold: config.optimize_threshold.unwrap_or(0.8),
+            quorum_reader: QuorumReader::new(config.server.server_id),
+            metrics_server: MetricsHeartbeatServer::new(config.clone()),
+            optimizer: ClusterOptimizer::new(config.clone()),
+            strategy: ClusterStrategy::initial_strategy(config.clone()),
+            optimize: config.cluster.optimize.unwrap_or(true),
+            optimize_threshold: config
+                .cluster
+                .optimize_threshold
+                .unwrap_or(DEFAULT_OPTIMIZE_THRESHOLD),
             experiment_state: ExperimentState::initial_state(config.clone()),
             output_file,
             config,
-        };
-        // Clears outgoing_messages of initial BLE messages
-        let _ = server.omnipaxos.outgoing_messages();
-        server
+        }
     }
 
     pub async fn run(&mut self) {
         self.start_log();
-        if self.config.num_clients == 0 {
+        if self.config.server.num_clients == 0 {
             self.experiment_state.node_finished(self.id);
             for peer in self.omnipaxos.get_peers() {
                 let done_msg = ClusterMessage::Done;
@@ -97,7 +87,7 @@ impl OmniPaxosServer {
         // We don't use Omnipaxos leader election and instead force an initial leader
         // Once the leader is established it chooses a synchronization point which the
         // followers relay to their clients to begin the experiment.
-        if self.config.initial_leader == self.id {
+        if self.config.cluster.initial_leader == self.id {
             self.become_initial_leader(&mut cluster_msg_buf, &mut client_msg_buf)
                 .await;
             let experiment_sync_start = (Utc::now() + Duration::from_secs(2)).timestamp_millis();
@@ -211,7 +201,7 @@ impl OmniPaxosServer {
 
     fn update_current_strategy(&mut self) {
         let read_quorum = self.omnipaxos.get_read_config().read_quorum_size;
-        let write_quorum = self.config.nodes.len() - read_quorum + 1;
+        let write_quorum = self.config.cluster.nodes.len() - read_quorum + 1;
         let leader = self
             .omnipaxos
             .get_current_leader()
@@ -234,10 +224,11 @@ impl OmniPaxosServer {
             self.send_outgoing_msgs();
         }
         if optimal_strategy.read_quorum_size != self.strategy.read_quorum_size {
-            let write_quorum_size = self.config.nodes.len() - optimal_strategy.read_quorum_size + 1;
+            let write_quorum_size =
+                self.config.cluster.nodes.len() - optimal_strategy.read_quorum_size + 1;
             let new_config = ClusterConfig {
                 configuration_id: 1,
-                nodes: self.config.nodes.clone(),
+                nodes: self.config.cluster.nodes.clone(),
                 flexible_quorum: Some(FlexibleQuorum {
                     read_quorum_size: optimal_strategy.read_quorum_size,
                     write_quorum_size,
@@ -448,7 +439,7 @@ impl OmniPaxosServer {
     }
 
     fn send_client_start_signals(&mut self, start_time: Timestamp) {
-        for client_id in 1..self.config.num_clients as ClientId + 1 {
+        for client_id in 1..self.config.server.num_clients as ClientId + 1 {
             debug!("Sending start message to client {client_id}");
             let msg = ServerMessage::StartSignal(start_time);
             self.network.send_to_client(client_id, msg);
@@ -552,9 +543,9 @@ enum State {
 }
 
 impl ExperimentState {
-    fn initial_state(config: AutoQuorumServerConfig) -> Self {
-        let node_states = vec![State::Running; config.nodes.len()];
-        let client_states = vec![State::Running; config.num_clients];
+    fn initial_state(config: AutoQuorumConfig) -> Self {
+        let node_states = vec![State::Running; config.cluster.nodes.len()];
+        let client_states = vec![State::Running; config.server.num_clients];
         ExperimentState {
             node_states,
             client_states,
@@ -578,7 +569,6 @@ impl ExperimentState {
     }
 
     fn is_finished(&self) -> bool {
-        // self.node_states.iter().all(|s| *s == State::Done)
         self.my_clients_are_finished()
     }
 

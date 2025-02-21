@@ -1,7 +1,7 @@
 use auto_quorum::common::{kv::NodeId, messages::ReadStrategy};
 use serde::Serialize;
 
-use crate::{configs::AutoQuorumServerConfig, metrics::Load};
+use crate::{configs::AutoQuorumConfig, metrics::Load};
 
 // TODO: make this a config setting
 const FAILURE_TOLERANCE: usize = 1;
@@ -15,18 +15,18 @@ pub struct ClusterStrategy {
 }
 
 impl ClusterStrategy {
-    pub fn initial_strategy(config: AutoQuorumServerConfig) -> Self {
-        let num_nodes = config.nodes.len();
-        let init_read_quorum = match config.initial_flexible_quorum {
+    pub fn initial_strategy(config: AutoQuorumConfig) -> Self {
+        let num_nodes = config.cluster.nodes.len();
+        let init_read_quorum = match config.cluster.initial_flexible_quorum {
             Some(flex_quroum) => flex_quroum.read_quorum_size,
             None => num_nodes / 2 + 1,
         };
-        let init_read_strat = match config.initial_read_strat {
+        let init_read_strat = match config.cluster.initial_read_strat {
             Some(strats) => strats,
             None => vec![ReadStrategy::default(); num_nodes],
         };
         Self {
-            leader: config.initial_leader,
+            leader: config.cluster.initial_leader,
             read_quorum_size: init_read_quorum,
             write_quorum_size: num_nodes - init_read_quorum + 1,
             read_strategies: init_read_strat,
@@ -52,8 +52,8 @@ pub struct ClusterOptimizer {
 }
 
 impl ClusterOptimizer {
-    pub fn new(nodes: Vec<NodeId>) -> ClusterOptimizer {
-        let num_nodes = nodes.len();
+    pub fn new(config: AutoQuorumConfig) -> ClusterOptimizer {
+        let num_nodes = config.cluster.nodes.len();
         let quorum_indices = Self::create_quorum_indices(num_nodes);
         let num_quorum_options = quorum_indices.len();
         ClusterOptimizer {

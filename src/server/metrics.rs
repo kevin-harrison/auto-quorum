@@ -5,6 +5,8 @@ use auto_quorum::common::{
 use serde::Serialize;
 use tokio::time::Instant;
 
+use crate::configs::AutoQuorumConfig;
+
 const LATENCY_CAP: f64 = 9999.;
 
 #[derive(Debug, Clone, Copy, Default, Serialize)]
@@ -71,9 +73,14 @@ impl ClusterMetrics {
 }
 
 impl MetricsHeartbeatServer {
-    pub fn new(pid: NodeId, nodes: Vec<NodeId>) -> Self {
-        let num_nodes = nodes.len();
-        let peers = nodes.into_iter().filter(|id| *id != pid).collect();
+    pub fn new(config: AutoQuorumConfig) -> Self {
+        let num_nodes = config.cluster.nodes.len();
+        let peers = config
+            .cluster
+            .nodes
+            .into_iter()
+            .filter(|id| *id != config.server.server_id)
+            .collect();
         let mut initial_latencies = vec![vec![50.; num_nodes]; num_nodes];
         for i in 0..num_nodes {
             initial_latencies[i][i] = 0.;
@@ -85,7 +92,7 @@ impl MetricsHeartbeatServer {
         };
         Self {
             metrics: initial_metrics,
-            pid,
+            pid: config.server.server_id,
             peers,
             latency_smoothing_factor: 0.9,
             workload_smoothing_factor: 0.9,

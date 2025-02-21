@@ -5,7 +5,7 @@ use chrono::Utc;
 use csv::Writer;
 use serde::Serialize;
 
-use crate::client::ClientConfig;
+use crate::configs::ClientConfig;
 
 #[derive(Debug, Serialize, Clone, Copy)]
 struct RequestData {
