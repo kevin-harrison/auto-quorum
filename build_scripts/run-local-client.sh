@@ -1,4 +1,5 @@
 #!/bin/bash
+set -eu
 
 client1_id=1
 client2_id=2

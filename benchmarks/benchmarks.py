@@ -21,13 +21,14 @@ def round_robin_workload() -> dict[int, list[RequestInterval]]:
         workload[node] = requests
     return workload
 
+
 def round_robin_cluster():
     cluster = (
-        AutoQuorumClusterBuilder("cluster-5-1")
+        AutoQuorumClusterBuilder(1)
         .initial_leader(1)
         .optimize_setting(False)
         .optimize_threshold(0.85)
-        .initial_quorum(FlexibleQuorum(4,2))
+        .initial_quorum(FlexibleQuorum(4, 2))
         .server(1, "us-west2-a")
         .server(2, "us-south1-a")
         .server(3, "us-east4-a")
@@ -41,93 +42,45 @@ def round_robin_cluster():
     ).build()
     return cluster
 
+
 def round_robin_experiment5():
-    experiment_log_dir = Path(f"./logs/round-robin-5")
+    experiment_log_dir = Path("./logs/round-robin-5")
     cluster = round_robin_cluster()
     workload = round_robin_workload()
     for id, requests in workload.items():
         cluster.change_client_config(id, requests=requests)
 
-    # # Baseline
-    # iteration_dir = Path.joinpath(experiment_log_dir, "Baseline")
-    # cluster.run(iteration_dir)
+    # Baseline
+    iteration_dir = Path.joinpath(experiment_log_dir, "Baseline")
+    cluster.run(iteration_dir)
 
     # AutoQuorum
     cluster.change_cluster_config(optimize=True)
     iteration_dir = Path.joinpath(experiment_log_dir, "AutoQuorum")
     cluster.run(iteration_dir)
 
-    # # MultiLeader
-    # cluster.change_cluster_config(optimize=False, multileader=True, initial_flexible_quorum=FlexibleQuorum(3,3))
-    # iteration_dir = Path.joinpath(experiment_log_dir, "MultiLeader-Majority")
-    # cluster.run(iteration_dir)
-    #
-    # # Super Majority
-    # cluster.change_cluster_config(initial_flexible_quorum=FlexibleQuorum(4, 4))
-    # iteration_dir = Path.joinpath(experiment_log_dir, "MultiLeader-SuperMajority")
-    # cluster.run(iteration_dir)
-    # # cluster.shutdown()
-
-def round_robin_experiment():
-    cluster_size = 3
-    experiment_log_dir = Path(f"./logs/round-robin-w-multileader")
-    cluster_name = f"cluster-{cluster_size}-1"
-    cluster = (
-        AutoQuorumClusterBuilder(cluster_name)
-        .initial_leader(2)
-        .optimize_setting(True)
-        .optimize_threshold(0.85)
-        .server(1, "europe-west2-a")
-        .client(1, "europe-west2-a")
-        .server(2, "europe-southwest1-a")
-        .client(2, "europe-southwest1-a")
-        .server(3, "europe-west10-a")
-        .client(3, "europe-west10-a")
-    ).build()
-
-    # Shifting workload
-    r = 0.0  # read ratio
-    cluster.change_client_config(
-        2,
-        requests=[RequestInterval(10, 10, r), RequestInterval(20, 2, r)],
+    # MultiLeader
+    cluster.change_cluster_config(
+        optimize=False, multileader=True, initial_flexible_quorum=FlexibleQuorum(3, 3)
     )
-    cluster.change_client_config(
-        1,
-        requests=[
-            RequestInterval(10, 2, r),
-            RequestInterval(10, 10, r),
-            RequestInterval(10, 2, r),
-        ],
-    )
-    cluster.change_client_config(
-        3,
-        requests=[RequestInterval(20, 2, r), RequestInterval(10, 10, r)],
-    )
+    iteration_dir = Path.joinpath(experiment_log_dir, "MultiLeader-Majority")
+    cluster.run(iteration_dir)
 
-    # Omnipaxos runs
-    for optimize in [True, False]:
-        cluster.change_cluster_config(optimize=optimize)
-        cluster.start_servers()
-        cluster.start_clients()
-        cluster.await_cluster()
-        iteration_directory = Path.joinpath(
-            experiment_log_dir, f"{'autoquorum' if optimize else 'baseline'}"
-        )
-        cluster.get_logs(iteration_directory)
+    # Super Majority
+    cluster.change_cluster_config(initial_flexible_quorum=FlexibleQuorum(4, 4))
+    iteration_dir = Path.joinpath(experiment_log_dir, "MultiLeader-SuperMajority")
+    cluster.run(iteration_dir)
 
-    # Multileader run
-    cluster.change_cluster_config(multileader=True)
-    cluster.start_servers()
-    cluster.start_clients()
-    cluster.await_cluster()
-    iteration_directory = Path.joinpath(experiment_log_dir, "multileader")
-    cluster.get_logs(iteration_directory)
-
-    cluster.shutdown()
+    # cluster.shutdown()
 
 
 def shifting_conditions_experiment(cluster_type: str):
-    assert cluster_type in ["baseline", "autoquorum", "multileader-majority", "multileader-supermajority"]
+    assert cluster_type in [
+        "baseline",
+        "autoquorum",
+        "multileader-majority",
+        "multileader-supermajority",
+    ]
     if cluster_type in ["baseline", "autoquorum"]:
         multileader = False
     else:
@@ -139,10 +92,9 @@ def shifting_conditions_experiment(cluster_type: str):
     period1_hotspot = 2
     failed_node = 1
     period3_hotspot = 5
-    experiment_dir = Path(f"./logs/shifting-conditions")
-    cluster_name = f"cluster-{cluster_size}-1"
+    experiment_dir = Path("./logs/shifting-conditions")
     cluster = (
-        AutoQuorumClusterBuilder(cluster_name)
+        AutoQuorumClusterBuilder(1)
         .initial_leader(period1_hotspot)
         .optimize_setting(False)
         .multileader(multileader)
@@ -173,10 +125,10 @@ def shifting_conditions_experiment(cluster_type: str):
 
     # Period 2 (US node faiure)
     print("PERIOD 2:")
-    cluster.change_client_config(failed_node, kill_signal_sec=0, next_server=None)
+    cluster.change_client_config(failed_node, kill_signal_sec=0)
     if optimize:
         cluster.change_cluster_config(initial_flexible_quorum=FlexibleQuorum(4, 2))
-    cluster.run(Path.joinpath(experiment_dir, f"period-2/{cluster_type}"), partitioned_node=failed_node)
+    cluster.run(Path.joinpath(experiment_dir, f"period-2/{cluster_type}"))
 
     # Period 3 (Write shift)
     print("PERIOD 3:")
@@ -184,7 +136,7 @@ def shifting_conditions_experiment(cluster_type: str):
     cluster.change_client_config(period3_hotspot, requests=high_requests)
     if optimize:
         cluster.change_cluster_config(initial_leader=period3_hotspot)
-    cluster.run(Path.joinpath(experiment_dir, f"period-3/{cluster_type}"), partitioned_node=failed_node)
+    cluster.run(Path.joinpath(experiment_dir, f"period-3/{cluster_type}"))
 
     # Period 4 (Read dominant)
     print("PERIOD 4:")
@@ -199,8 +151,9 @@ def shifting_conditions_experiment(cluster_type: str):
             initial_flexible_quorum=FlexibleQuorum(2, 4),
             initial_read_strat=[ReadStrategy.BallotRead] * cluster_size,
         )
-    cluster.run(Path.joinpath(experiment_dir, f"period-4/{cluster_type}"), partitioned_node=failed_node)
+    cluster.run(Path.joinpath(experiment_dir, f"period-4/{cluster_type}"))
     # cluster.shutdown()
+
 
 def read_strats_workload(
     read_ratio_range=None,
@@ -227,15 +180,20 @@ def read_strats_workload(
                 node_workloads = {}
                 for node in nodes:
                     if node in us_nodes:
-                        node_workloads[node] = [RequestInterval(experiment_dur, us_load, read_ratio)]
+                        node_workloads[node] = [
+                            RequestInterval(experiment_dur, us_load, read_ratio)
+                        ]
                     else:
-                        node_workloads[node] = [RequestInterval(experiment_dur, eu_load, read_ratio)]
+                        node_workloads[node] = [
+                            RequestInterval(experiment_dur, eu_load, read_ratio)
+                        ]
                 workloads.append(node_workloads)
     return workloads
 
+
 def read_strats_cluster():
     cluster = (
-        AutoQuorumClusterBuilder("cluster-5-1")
+        AutoQuorumClusterBuilder(1)
         .initial_leader(2)
         .optimize_setting(False)
         .server(1, "us-west2-a")
@@ -251,6 +209,7 @@ def read_strats_cluster():
     ).build()
     return cluster
 
+
 def run_read_strats_cluster(cluster: AutoQuorumCluster, experiment_dir: Path):
     bread_strat = (2, FlexibleQuorum(2, 4), ReadStrategy.BallotRead)
     qread_strat = (2, FlexibleQuorum(2, 4), ReadStrategy.QuorumRead)
@@ -264,16 +223,16 @@ def run_read_strats_cluster(cluster: AutoQuorumCluster, experiment_dir: Path):
         )
         cluster.run(Path.joinpath(experiment_dir, f"{read_strat.value}"))
     # Run EPaxos
-    print(f"EPaxos iteration")
+    print("EPaxos iteration")
     cluster.change_cluster_config(
         initial_leader=2,
-        initial_flexible_quorum=FlexibleQuorum(4,4),
+        initial_flexible_quorum=FlexibleQuorum(4, 4),
         initial_read_strat=[ReadStrategy.ReadAsWrite] * 5,
         multileader=True,
     )
     cluster.run(Path.joinpath(experiment_dir, "EPaxos"))
     # Run AutoQuorum
-    print(f"AutoQuorum iteration")
+    print("AutoQuorum iteration")
     cluster.change_cluster_config(
         optimize=True,
         optimize_threshold=0.85,
@@ -294,9 +253,10 @@ def read_strats_benchmark():
     workload = workloads[0]
     for id, requests in workload.items():
         cluster.change_client_config(id, requests=requests)
-    experiment_dir = Path(f"./logs/read-strats")
+    experiment_dir = Path("./logs/read-strats")
     run_read_strats_cluster(cluster, experiment_dir)
     # cluster.shutdown()
+
 
 def read_strats_over_workload_benchmark():
     cluster = read_strats_cluster()
@@ -310,6 +270,7 @@ def read_strats_over_workload_benchmark():
         run_read_strats_cluster(cluster, iteration_dir)
     # cluster.shutdown()
 
+
 def read_strats_over_ratio_benchmark():
     cluster = read_strats_cluster()
     read_ratios = [0.1, 0.3, 0.5, 0.7, 0.9]
@@ -322,6 +283,7 @@ def read_strats_over_ratio_benchmark():
         iteration_dir = Path(f"./logs/read-strats/read-ratio-{read_ratio}")
         run_read_strats_cluster(cluster, iteration_dir)
     # cluster.shutdown()
+
 
 def read_strats_over_absolute_rate_benchmark():
     cluster = read_strats_cluster()
@@ -366,18 +328,25 @@ def mixed_strats_workload(
                 node_workloads = {}
                 for node in nodes:
                     if node == left_node:
-                        node_workloads[node] = [RequestInterval(experiment_dur, left_load, read_ratio)]
+                        node_workloads[node] = [
+                            RequestInterval(experiment_dur, left_load, read_ratio)
+                        ]
                     elif node in center_nodes:
-                        node_workloads[node] = [RequestInterval(experiment_dur, center_load, read_ratio)]
+                        node_workloads[node] = [
+                            RequestInterval(experiment_dur, center_load, read_ratio)
+                        ]
                     else:
                         assert node in right_nodes
-                        node_workloads[node] = [RequestInterval(experiment_dur, right_load, read_ratio)]
+                        node_workloads[node] = [
+                            RequestInterval(experiment_dur, right_load, read_ratio)
+                        ]
                 workloads.append(node_workloads)
     return workloads
 
+
 def mixed_strats_cluster():
     cluster = (
-        AutoQuorumClusterBuilder("cluster-5-1")
+        AutoQuorumClusterBuilder(1)
         .initial_leader(1)
         .initial_quorum(FlexibleQuorum(4, 2))
         .optimize_setting(False)
@@ -394,24 +363,28 @@ def mixed_strats_cluster():
     ).build()
     return cluster
 
+
 def run_mixed_strats_cluster(cluster: AutoQuorumCluster, experiment_dir: Path):
-    mixed_strat = ("Mixed", (2 * [ReadStrategy.ReadAsWrite]) + (3 * [ReadStrategy.BallotRead]))
-    bread_strat = ("BallotRead", [ReadStrategy.BallotRead]*5)
-    wread_strat = ("ReadAsWrite", [ReadStrategy.ReadAsWrite]*5)
+    mixed_strat = (
+        "Mixed",
+        (2 * [ReadStrategy.ReadAsWrite]) + (3 * [ReadStrategy.BallotRead]),
+    )
+    bread_strat = ("BallotRead", [ReadStrategy.BallotRead] * 5)
+    wread_strat = ("ReadAsWrite", [ReadStrategy.ReadAsWrite] * 5)
     for name, read_strat in [mixed_strat, bread_strat, wread_strat]:
         print(f"Read Strat Iteration: {name}")
         cluster.change_cluster_config(initial_read_strat=read_strat)
         cluster.run(Path.joinpath(experiment_dir, name))
     # Run EPaxos
-    print(f"EPaxos iteration")
+    print("EPaxos iteration")
     cluster.change_cluster_config(
-        initial_flexible_quorum=FlexibleQuorum(4,4),
+        initial_flexible_quorum=FlexibleQuorum(4, 4),
         initial_read_strat=[ReadStrategy.ReadAsWrite] * 5,
         multileader=True,
     )
     cluster.run(Path.joinpath(experiment_dir, "EPaxos"))
     # Run AutoQuorum
-    print(f"AutoQuorum iteration")
+    print("AutoQuorum iteration")
     cluster.change_cluster_config(
         optimize=True,
         optimize_threshold=0.85,
@@ -422,15 +395,17 @@ def run_mixed_strats_cluster(cluster: AutoQuorumCluster, experiment_dir: Path):
     cluster.run(Path.joinpath(experiment_dir, "AutoQuorum"))
     cluster.change_cluster_config(optimize=False)
 
+
 # Show how having different strats per node is optimal
 def mixed_strats_benchmark():
-    experiment_dir = Path(f"./logs/mixed-strats")
+    experiment_dir = Path("./logs/mixed-strats")
     cluster = mixed_strats_cluster()
     workload = mixed_strats_workload()[0]
     for id, requests in workload.items():
         cluster.change_client_config(id, requests=requests)
     run_mixed_strats_cluster(cluster, experiment_dir)
     # cluster.shutdown()
+
 
 def mixed_strats_over_workload_benchmark():
     cluster = mixed_strats_cluster()
@@ -443,6 +418,7 @@ def mixed_strats_over_workload_benchmark():
         iteration_dir = Path(f"./logs/mixed-strats/eu-load-{relative_eu_load}")
         run_mixed_strats_cluster(cluster, iteration_dir)
     # cluster.shutdown()
+
 
 def mixed_strats_over_ratio_benchmark():
     cluster = mixed_strats_cluster()
@@ -459,7 +435,7 @@ def mixed_strats_over_ratio_benchmark():
 
 def even_load_cluster():
     cluster = (
-        AutoQuorumClusterBuilder("cluster-5-1")
+        AutoQuorumClusterBuilder(1)
         .initial_leader(3)
         .server(1, "us-west2-a")
         .server(2, "us-south1-a")
@@ -474,16 +450,18 @@ def even_load_cluster():
     ).build()
     return cluster
 
+
 def even_load_workload():
     workload = {}
     requests = [RequestInterval(duration_sec=10, requests_per_sec=100, read_ratio=0)]
-    for node in [1,2,3,4,5]:
+    for node in [1, 2, 3, 4, 5]:
         workload[node] = requests
     return workload
 
+
 # Show how having different strats per node is optimal
 def even_load_benchmark():
-    experiment_dir = Path(f"./logs/even-load")
+    experiment_dir = Path("./logs/even-load")
     cluster = even_load_cluster()
     workload = even_load_workload()
     for id, requests in workload.items():
@@ -492,7 +470,7 @@ def even_load_benchmark():
     # AutoQuorum Run
     cluster.change_cluster_config(
         initial_leader=3,
-        initial_flexible_quorum=FlexibleQuorum(4,2),
+        initial_flexible_quorum=FlexibleQuorum(4, 2),
         optimize=True,
         optimize_threshold=0.85,
     )
@@ -502,7 +480,7 @@ def even_load_benchmark():
     # SuperMajority Run
     cluster.change_cluster_config(
         multileader=True,
-        initial_flexible_quorum=FlexibleQuorum(4,4),
+        initial_flexible_quorum=FlexibleQuorum(4, 4),
         optimize=False,
     )
     iteration_dir = Path(experiment_dir, "MultiLeader-SuperMajority")
@@ -511,7 +489,7 @@ def even_load_benchmark():
     # Majority Run
     cluster.change_cluster_config(
         multileader=True,
-        initial_flexible_quorum=FlexibleQuorum(3,3),
+        initial_flexible_quorum=FlexibleQuorum(3, 3),
         optimize=False,
     )
     iteration_dir = Path(experiment_dir, "MultiLeader-Majority")
@@ -520,16 +498,13 @@ def even_load_benchmark():
     # cluster.shutdown()
 
 
-
-
 def main():
-    # round_robin_experiment()
     # round_robin_experiment5()
 
-    shifting_conditions_experiment("baseline")
-    shifting_conditions_experiment("autoquorum")
-    shifting_conditions_experiment("multileader-majority")
-    shifting_conditions_experiment("multileader-supermajority")
+    # shifting_conditions_experiment("baseline")
+    # shifting_conditions_experiment("autoquorum")
+    # shifting_conditions_experiment("multileader-majority")
+    # shifting_conditions_experiment("multileader-supermajority")
 
     # read_strats_benchmark()
     # read_strats_over_workload_benchmark()

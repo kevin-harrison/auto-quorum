@@ -5,8 +5,7 @@ from typing import Optional
 
 from google.api_core.extended_operation import ExtendedOperation
 from google.cloud import compute_v1, dns
-from google.cloud.compute_v1 import (DeleteInstanceRequest,
-                                     InsertInstanceRequest, types)
+from google.cloud.compute_v1 import DeleteInstanceRequest, InsertInstanceRequest, types
 
 
 @dataclass(frozen=True)
@@ -15,6 +14,7 @@ class InstanceConfig:
     zone: str
     machine_type: str
     startup_script: str
+    custom_metadata: Optional[dict] = None
     firewall_tag: Optional[str] = None
     dns_name: Optional[str] = None
     service_account: Optional[str] = None
@@ -43,7 +43,7 @@ class GcpCluster:
 
     It relies on Google Cloud SDK (gcloud) for managing credentials and SSH access to instances.
     Application Default Credentials are used when creating instances, and OS login credentials
-    are used for SSH. To configure gcloud credentials, refer to `../build_scripts/auth.sh`.
+    are used for SSH. To configure gcloud credentials, refer to `./scripts/auth.sh`.
 
     Assumptions:
         - A VPC network named `internal.zone.` exists.
@@ -159,29 +159,6 @@ Run: gcloud dns managed-zones create internal-network \\
         p = subprocess.Popen(gcloud_command, shell=False)
         return p
 
-    @staticmethod
-    def get_oslogin_username() -> str:
-        get_username_process = subprocess.run(
-            [
-                "gcloud",
-                "compute",
-                "os-login",
-                "describe-profile",
-                "--format=value(posixAccounts[0].username)",
-            ],
-            shell=False,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-        username = get_username_process.stdout.strip()
-        if get_username_process.returncode != 0 or not username:
-            raise ValueError(
-                f"Couldn't find gcloud os-login username. Configure gcloud credentials with `gcloud auth login`\n{get_username_process.stderr}"
-            )
-        else:
-            return username
-
     # Shutdown all currently running instances
     def shutdown(self):
         self.shutdown_instances(list(self.instances.keys()))
@@ -278,28 +255,24 @@ Run: gcloud dns managed-zones create internal-network \\
                 ),
             ],
         )
-        metadata = types.Metadata(
-            # Create with startup script
-            items=[
-                {
-                    "key": "startup-script",
-                    "value": instance_config.startup_script,
-                },
-                {"key": "enable-oslogin", "value": "TRUE"},
-            ]
-            # # Create as a kubernetes cluster
-            # items=[{
-            #     "key":"gce-container-declaration",
-            #     "value": startup_script,
-            #     }],
-        )
+        metadata_items = [
+            {
+                "key": "startup-script",
+                "value": instance_config.startup_script,
+            },
+            {"key": "enable-oslogin", "value": "TRUE"},
+        ]
+        if instance_config.custom_metadata is not None:
+            for k, v in instance_config.custom_metadata.items():
+                metadata_items.append({"key": k, "value": v})
+        metadata = types.Metadata(items=metadata_items)
         tags = types.Tags()
         if instance_config.firewall_tag:
             tags.items = [instance_config.firewall_tag]
-        # scheduling = types.Scheduling(
-        #         provisioning_model=compute_v1.Scheduling.ProvisioningModel.SPOT.name,
-        #         instance_termination_action="STOP"
-        #         )
+        scheduling = types.Scheduling(
+            provisioning_model=compute_v1.Scheduling.ProvisioningModel.SPOT.name,
+            instance_termination_action="STOP",
+        )
         os_service_accounts = (
             [
                 types.ServiceAccount(

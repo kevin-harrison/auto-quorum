@@ -1,15 +1,16 @@
 #!/bin/bash
+set -eu
 
 usage="Usage: run-local-cluster.sh [server_type]"
 cluster_size=3
 server_bin="server"
 rust_log="info"
 
-if [ -n "$1" ] && [ "$1" != "multi" ]; then
+if [ -n "${1:-}" ] && [ "${1:-}" != "multi" ]; then
     echo "Error: Invalid argument. Expected 'multi', got '$1'."
     exit 1
 fi
-if [ "$1" = "multi" ]; then
+if [ "${1:-}" = "multi" ]; then
     server_bin="multileader-server"
 fi
 
