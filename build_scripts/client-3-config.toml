@@ -1,0 +1,19 @@
+location = "local-3"
+server_id = 3
+server_address = "127.0.0.1:8003"
+read_ratio = 0.25
+#kill_signal_sec = 0
+#next_server = 1
+summary_filepath = "./logs/client-3.json"
+output_filepath = "./logs/client-3.csv"
+
+[[requests]]
+duration_sec = 5
+requests_per_sec = 10
+read_ratio = 0.25
+
+[[requests]]
+duration_sec = 10
+requests_per_sec = 1
+read_ratio = 0.25
+

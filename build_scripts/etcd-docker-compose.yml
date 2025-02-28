@@ -1,0 +1,72 @@
+x-common-variables: &common-server-variables
+  ETCD_DATA_DIR: "etcd-data"
+  ETCD_ALLOW_NONE_AUTHENTICATION: "yes"
+  ETCD_LISTEN_CLIENT_URLS: "http://0.0.0.0:2379"
+  ETCD_LISTEN_PEER_URLS: "http://0.0.0.0:2380"
+  ETCD_INITIAL_CLUSTER: "node1=http://s1:2380,node2=http://s2:2380,node3=http://s3:2380"
+  ETCD_INITIAL_CLUSTER_STATE: "new"
+
+services:
+  s1:
+    image: gcr.io/etcd-development/etcd:v3.4.35
+    container_name: s1
+    environment:
+      <<: *common-server-variables
+      ETCD_NAME: "node1"
+      ETCD_ADVERTISE_CLIENT_URLS: "http://s1:2379"
+      ETCD_INITIAL_ADVERTISE_PEER_URLS: "http://s1:2380"
+  s2:
+    image: gcr.io/etcd-development/etcd:v3.4.35
+    container_name: s2
+    environment:
+      <<: *common-server-variables
+      ETCD_NAME: "node2"
+      ETCD_ADVERTISE_CLIENT_URLS: "http://s2:2379"
+      ETCD_INITIAL_ADVERTISE_PEER_URLS: "http://s2:2380"
+  s3:
+    image: gcr.io/etcd-development/etcd:v3.4.35
+    container_name: s3
+    environment:
+      <<: *common-server-variables
+      ETCD_NAME: "node3"
+      ETCD_ADVERTISE_CLIENT_URLS: "http://s3:2379"
+      ETCD_INITIAL_ADVERTISE_PEER_URLS: "http://s3:2380"
+  c1:
+    image: etcd-client
+    build:
+      context: ./..
+      dockerfile: etcd-client.dockerfile
+    container_name: c1
+    environment:
+      RUST_LOG: "debug"
+      CONFIG_FILE: "/app/client-config.toml"
+      AUTOQUORUM_SERVER_ADDRESS: "s1:2379" # Overwrite server_address in client config TOML
+      AUTOQUORUM_SERVER_NAME: "node1" 
+      AUTOQUORUM_INITIAL_LEADER: "node1"
+    volumes:
+      - ./client-1-config.toml:/app/client-config.toml
+      - ./logs/:/app/logs/
+  c2:
+    image: etcd-client
+    container_name: c2
+    environment:
+      RUST_LOG: "debug"
+      CONFIG_FILE: "/app/client-config.toml"
+      AUTOQUORUM_SERVER_ADDRESS: "s2:2379" # Overwrite server_address in client config TOML
+      AUTOQUORUM_SERVER_NAME: "node2" 
+      AUTOQUORUM_INITIAL_LEADER: "node1"
+    volumes:
+      - ./client-2-config.toml:/app/client-config.toml
+      - ./logs/:/app/logs/
+  c3:
+    image: etcd-client
+    container_name: c3
+    environment:
+      RUST_LOG: "debug"
+      CONFIG_FILE: "/app/client-config.toml"
+      AUTOQUORUM_SERVER_ADDRESS: "s3:2379" # Overwrite server_address in client config TOML
+      AUTOQUORUM_SERVER_NAME: "node3" 
+      AUTOQUORUM_INITIAL_LEADER: "node1"
+    volumes:
+      - ./client-3-config.toml:/app/client-config.toml
+      - ./logs/:/app/logs/
