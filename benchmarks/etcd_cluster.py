@@ -1,19 +1,12 @@
 import subprocess
 from pathlib import Path
 
-from autoquorum_configs import (
-    ClientConfig,
-    ClusterConfig,
-    FlexibleQuorum,
-    ReadStrategy,
-    RequestInterval,
-    ServerConfig,
-)
+from etcd_configs import ClientConfig, ClusterConfig, RequestInterval, ServerConfig
 from gcp_cluster import GcpCluster, InstanceConfig
 from gcp_ssh_client import GcpClusterSSHClient
 
 
-class AutoQuorumCluster:
+class EtcdCluster:
     """
     Orchestration class for managing an AutoQuorum cluster on GCP.
 
@@ -56,7 +49,7 @@ class AutoQuorumCluster:
         Starts servers and clients but only waits for client processes to exit before
         killing remote processes and pulling logs.
         """
-        server_process_ids = self._start_servers(pull_images=pull_images)
+        server_process_ids = self._start_servers()
         client_process_ids = self._start_clients(pull_images=pull_images)
         clients_finished = self._gcp_ssh_client.await_processes_concurrent(
             client_process_ids
@@ -69,18 +62,22 @@ class AutoQuorumCluster:
         self._get_logs(logs_directory)
 
     def change_cluster_config(self, **kwargs):
-        self._cluster_config = self._cluster_config.update_autoquorum_config(**kwargs)
+        self._cluster_config = self._cluster_config.update_etcd_config(**kwargs)
+        for k, v in kwargs:
+            if k == "initial_leader":
+                for client_id in self._cluster_config.client_configs.keys():
+                    self.change_client_config(client_id, k=f"node{v}")
 
     def change_server_config(self, server_id: int, **kwargs):
         server_config = self._get_server_config(server_id)
         self._cluster_config.server_configs[server_id] = (
-            server_config.update_autoquorum_config(**kwargs)
+            server_config.update_etcd_config(**kwargs)
         )
 
     def change_client_config(self, client_id: int, **kwargs):
         client_config = self._get_client_config(client_id)
         self._cluster_config.client_configs[client_id] = (
-            client_config.update_autoquorum_config(**kwargs)
+            client_config.update_etcd_config(**kwargs)
         )
 
     def shutdown(self):
@@ -93,12 +90,12 @@ class AutoQuorumCluster:
         instance_names.extend(client_names)
         self._gcp_cluster.shutdown_instances(instance_names)
 
-    def _start_servers(self, pull_images: bool = False) -> list[str]:
+    def _start_servers(self) -> list[str]:
         process_ids = []
         for id, config in self._cluster_config.server_configs.items():
             process_id = f"server-{id}"
             instance_name = config.instance_config.name
-            ssh_command = self._start_server_command(id, pull_image=pull_images)
+            ssh_command = self._start_server_command(id)
             self._gcp_ssh_client.start_process(process_id, instance_name, ssh_command)
             process_ids.append(process_id)
         return process_ids
@@ -149,25 +146,15 @@ class AutoQuorumCluster:
             raise ValueError(f"Client {client_id} doesn't exist")
         return client_config
 
-    def _start_server_command(self, server_id: int, pull_image: bool = False) -> str:
+    def _start_server_command(self, server_id: int) -> str:
         config = self._get_server_config(server_id)
-        aq_config = config.autoquorum_server_config
-        server_config_toml = config.generate_server_toml()
-        cluster_config_toml = self._cluster_config.generate_cluster_toml()
-        server_image = (
-            self._cluster_config.multileader_server_image
-            if self._cluster_config.multileader
-            else self._cluster_config.server_image
-        )
+        etcd_config = config.etcd_server_config
         start_server_command = (
             f"cat <<EOF > run_container.sh\n{config.run_script}\nEOF\n &&",
-            f"PULL_IMAGE={'true' if pull_image else 'false'}",
-            f"SERVER_IMAGE={server_image}",
-            f"SERVER_CONFIG_TOML=$(cat <<EOF\n{server_config_toml}\nEOF\n)",
-            f"CLUSTER_CONFIG_TOML=$(cat <<EOF\n{cluster_config_toml}\nEOF\n)",
-            f"LISTEN_PORT={aq_config.listen_port}",
-            f"RUST_LOG={config.rust_log}",
-            f"SERVER_ID={aq_config.server_id}",
+            f"ETCD_INITIAL_CLUSTER={etcd_config.initial_cluster}",
+            f"ETCD_NAME={etcd_config.name}",
+            f"ETCD_ADVERTISE_CLIENT_URLS={etcd_config.advertise_client_urls}",
+            f"ETCD_INITIAL_ADVERTISE_PEER_URLS={etcd_config.initial_advertise_peer_urls}",
             "bash ./run_container.sh",
         )
         return " ".join(start_server_command)
@@ -186,7 +173,7 @@ class AutoQuorumCluster:
         return " ".join(start_client_command)
 
 
-class AutoQuorumClusterBuilder:
+class EtcdClusterBuilder:
     """
     Builder class for defining and validating configurations to start a AutoQuorumCluster.
     Relies on environment variables from `./scripts/project_env.sh` to configure settings.
@@ -199,29 +186,18 @@ class AutoQuorumClusterBuilder:
         self._service_account = env_vals["SERVICE_ACCOUNT"]
         self._gcloud_ssh_user = env_vals["OSLOGIN_USERNAME"]
         self._gcloud_oslogin_uid = env_vals["OSLOGIN_UID"]
-        self._server_docker_image_name = env_vals["SERVER_DOCKER_IMAGE_NAME"]
-        self._multileader_server_docker_image_name = env_vals[
-            "MULTILEADER_SERVER_DOCKER_IMAGE_NAME"
-        ]
-        self._client_docker_image_name = env_vals["CLIENT_DOCKER_IMAGE_NAME"]
+        self._client_docker_image_name = env_vals["ETCD_CLIENT_DOCKER_IMAGE_NAME"]
         self._instance_startup_script = self._get_instance_startup_script()
         self._server_configs: dict[int, ServerConfig] = {}
         self._client_configs: dict[int, ClientConfig] = {}
         # Cluster-wide settings
-        self._server_port: int = 8000
         self._initial_leader: int | None = None
-        self._initial_quorum: FlexibleQuorum | None = None
-        self._optimize_setting: bool | None = None
-        self._optimize_threshold: float | None = None
-        self._initial_read_strategy: list[ReadStrategy] | None = None
-        self._multileader: bool = False
 
     def server(
         self,
         server_id: int,
         zone: str,
         machine_type: str = "e2-standard-8",
-        rust_log: str = "info",
     ):
         if server_id in self._server_configs.keys():
             raise ValueError(f"Server {server_id} already exists")
@@ -237,22 +213,17 @@ class AutoQuorumClusterBuilder:
             dns_name=instance_name,
             service_account=self._service_account,
         )
-        server_address = (
-            f"{instance_config.dns_name}.internal.zone.:{self._server_port}"
-        )
+        server_address = f"{instance_config.dns_name}.internal.zone."
         server_config = ServerConfig(
             instance_config=instance_config,
-            server_address=server_address,
-            autoquorum_server_config=ServerConfig.AutoQuorumServerConfig(
-                location=zone,
-                server_id=server_id,
-                listen_address="0.0.0.0",
-                listen_port=self._server_port,
-                num_clients=0,  # dummy value
-                output_filepath=f"server-{server_id}.json",
+            server_address=f"{server_address:2379}",
+            etcd_server_config=ServerConfig.EtcdServerConfig(
+                name=f"node{server_id}",
+                advertise_client_urls=f"http://{server_address}:2379",
+                initial_advertise_peer_urls=f"http://{server_address}:2380",
+                initial_cluster="",  # dummy val
             ),
             run_script=self._get_run_server_script(),
-            rust_log=rust_log,
         )
         self._server_configs[server_id] = server_config
         return self
@@ -280,10 +251,12 @@ class AutoQuorumClusterBuilder:
         )
         client_config = ClientConfig(
             instance_config=instance_config,
-            autoquorum_client_config=ClientConfig.AutoQuorumClientConfig(
+            etcd_client_config=ClientConfig.EtcdClientConfig(
                 location=zone,
                 server_id=server_id,
-                server_address="",  # dummy value
+                server_name="",  # dummy val
+                server_address="",  # dummy val
+                initial_leader="",  # dummy val
                 requests=requests,
                 kill_signal_sec=kill_signal_sec,
                 summary_filepath=f"client-{server_id}.json",
@@ -299,74 +272,41 @@ class AutoQuorumClusterBuilder:
         self._initial_leader = initial_leader
         return self
 
-    def initial_quorum(self, flex_quorum: FlexibleQuorum):
-        self._initial_quorum = flex_quorum
-        return self
-
-    def optimize_setting(self, optimize: bool):
-        self._optimize_setting = optimize
-        return self
-
-    def initial_read_strategy(self, initial_read_strategy: list[ReadStrategy]):
-        self._initial_read_strategy = initial_read_strategy
-        return self
-
-    def optimize_threshold(self, threshold: float):
-        self._optimize_threshold = threshold
-        return self
-
-    def multileader(self, multileader: bool):
-        self._multileader = multileader
-        return self
-
-    def build(self) -> AutoQuorumCluster:
+    def build(self) -> EtcdCluster:
         if self._initial_leader is None:
             raise ValueError("Need to set cluster's initial leader")
-        # Add num_clients to server configs
-        for server_id, server_config in self._server_configs.items():
-            client_configs = self._client_configs.values()
-            server_id_matches = sum(
-                1
-                for _ in filter(
-                    lambda c: c.autoquorum_client_config.server_id == server_id,
-                    client_configs,
-                )
-            )
-            total_matches = server_id_matches
-            self._server_configs[server_id] = server_config.update_autoquorum_config(
-                num_clients=total_matches
-            )
+
         # Add server_address to client configs
         for client_id, client_config in self._client_configs.items():
             server_config = self._server_configs[
-                client_config.autoquorum_client_config.server_id
+                client_config.etcd_client_config.server_id
             ]
-            self._client_configs[client_id] = client_config.update_autoquorum_config(
-                server_address=server_config.server_address
+            self._client_configs[client_id] = client_config.update_etcd_config(
+                server_name=server_config.etcd_server_config.name,
+                server_address=server_config.server_address,
+                initial_leader=f"node{self._initial_leader}",
             )
-        nodes = sorted(self._server_configs.keys())
-        node_addrs = list(
-            map(lambda id: self._server_configs[id].server_address, nodes)
-        )
+
+        # Add initial cluster to server configs
+        initial_cluster = []
+        for server_config in self._server_configs.values():
+            address_mapping = f"{server_config.etcd_server_config.name}={server_config.etcd_server_config.initial_advertise_peer_urls}"
+            initial_cluster.append(address_mapping)
+        initial_cluster = ",".join(initial_cluster)
+        for server_id, server_config in self._server_configs.items():
+            self._server_configs[server_id] = server_config.update_etcd_config(
+                initial_cluster=initial_cluster
+            )
 
         cluster_config = ClusterConfig(
-            autoquorum_cluster_config=ClusterConfig.AutoQuorumClusterConfig(
-                nodes=nodes,
-                node_addrs=node_addrs,
+            etcd_cluster_config=ClusterConfig.EtcdClusterConfig(
                 initial_leader=self._initial_leader,
-                initial_flexible_quorum=self._initial_quorum,
-                optimize=self._optimize_setting,
-                optimize_threshold=self._optimize_threshold,
-                initial_read_strat=self._initial_read_strategy,
             ),
             server_configs=self._server_configs,
             client_configs=self._client_configs,
-            multileader=self._multileader,
             client_image=self._client_docker_image_name,
-            server_image=self._server_docker_image_name,
-            multileader_server_image=self._multileader_server_docker_image_name,
         )
-        return AutoQuorumCluster(self._project_id, cluster_config)
+        return EtcdCluster(self._project_id, cluster_config)
 
     @staticmethod
     def _get_project_env_variables() -> dict[str, str]:
@@ -375,9 +315,7 @@ class AutoQuorumClusterBuilder:
             "SERVICE_ACCOUNT",
             "OSLOGIN_USERNAME",
             "OSLOGIN_UID",
-            "CLIENT_DOCKER_IMAGE_NAME",
-            "SERVER_DOCKER_IMAGE_NAME",
-            "MULTILEADER_SERVER_DOCKER_IMAGE_NAME",
+            "ETCD_CLIENT_DOCKER_IMAGE_NAME",
         ]
         env_vals = {}
         process = subprocess.run(
@@ -404,7 +342,7 @@ class AutoQuorumClusterBuilder:
 
     @staticmethod
     def _get_run_server_script() -> str:
-        with open("./startup_scripts/run_server.sh", "r") as f:
+        with open("./startup_scripts/run_etcd_server.sh", "r") as f:
             return f.read()
 
     @staticmethod

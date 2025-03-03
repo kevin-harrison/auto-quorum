@@ -102,6 +102,7 @@ class ClusterConfig:
 class ServerConfig:
     instance_config: InstanceConfig
     autoquorum_server_config: AutoQuorumServerConfig
+    run_script: str
     rust_log: str
     server_address: str
 
@@ -150,6 +151,7 @@ class ServerConfig:
 class ClientConfig:
     instance_config: InstanceConfig
     autoquorum_client_config: AutoQuorumClientConfig
+    run_script: str
     rust_log: str = "info"
 
     @dataclass(frozen=True)

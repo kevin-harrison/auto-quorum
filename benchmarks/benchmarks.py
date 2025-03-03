@@ -44,7 +44,7 @@ def round_robin_cluster():
 
 
 def round_robin_experiment5():
-    experiment_log_dir = Path("./logs/round-robin-5")
+    experiment_log_dir = Path("./logs/TEST-round-robin-5")
     cluster = round_robin_cluster()
     workload = round_robin_workload()
     for id, requests in workload.items():
@@ -499,7 +499,7 @@ def even_load_benchmark():
 
 
 def main():
-    # round_robin_experiment5()
+    round_robin_experiment5()
 
     # shifting_conditions_experiment("baseline")
     # shifting_conditions_experiment("autoquorum")
