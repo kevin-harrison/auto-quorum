@@ -22,7 +22,7 @@ RUN cargo chef cook --release --recipe-path recipe.json
 
 # Build application
 COPY . .
-RUN cargo build --release --bin etcd-client
+RUN cargo build --release --bin etcd-client --features etcd-client-bin
 
 FROM debian:bookworm-slim AS runtime
 WORKDIR /app

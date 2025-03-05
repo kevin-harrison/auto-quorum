@@ -12,7 +12,7 @@ println_green() {
     printf "\033[0;32m$1\033[0m\n"
 }
 
-source ./project_env.sh # Get PROJECT_NAME and SERVER_DOCKER_IMAGE_NAME env vars
+source ./project_env.sh # Get image names
 if [ "${1:-}" = "multi" ]; then
     image_name=$MULTILEADER_SERVER_DOCKER_IMAGE_NAME
 else

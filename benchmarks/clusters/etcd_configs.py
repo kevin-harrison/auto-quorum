@@ -4,11 +4,14 @@ from dataclasses import asdict, dataclass, replace
 
 import toml
 
-from gcp_cluster import InstanceConfig
+from clusters.autoquorum_configs import RequestInterval
+from clusters.base_cluster import ClusterConfigProtocol, ServerConfigProtocol
+
+from .gcp_cluster import InstanceConfig
 
 
 @dataclass(frozen=True)
-class ClusterConfig:
+class ClusterConfig(ClusterConfigProtocol):
     etcd_cluster_config: EtcdClusterConfig
     server_configs: dict[int, ServerConfig]
     client_configs: dict[int, ClientConfig]
@@ -32,7 +35,7 @@ class ClusterConfig:
                 f"Initial leader {aq_config.initial_leader} must be one of the server nodes"
             )
 
-    def update_etcd_config(self, **kwargs) -> ClusterConfig:
+    def update_config(self, **kwargs) -> ClusterConfig:
         new_op_config = replace(self.etcd_cluster_config, **kwargs)
         new_config = replace(self, etcd_cluster_config=new_op_config)
         new_config.validate()
@@ -40,9 +43,11 @@ class ClusterConfig:
 
 
 @dataclass(frozen=True)
-class ServerConfig:
+class ServerConfig(ServerConfigProtocol):
     instance_config: InstanceConfig
     etcd_server_config: EtcdServerConfig
+    output_dir: str
+    kill_command: str
     server_address: str
     run_script: str
 
@@ -59,7 +64,7 @@ class ServerConfig:
     def validate(self):
         pass
 
-    def update_etcd_config(self, **kwargs) -> ServerConfig:
+    def update_config(self, **kwargs) -> ServerConfig:
         new_op_config = replace(self.etcd_server_config, **kwargs)
         new_config = replace(self, etcd_server_config=new_op_config)
         new_config.validate()
@@ -70,6 +75,8 @@ class ServerConfig:
 class ClientConfig:
     instance_config: InstanceConfig
     etcd_client_config: EtcdClientConfig
+    output_dir: str
+    kill_command: str
     run_script: str
     rust_log: str = "info"
 
@@ -105,7 +112,7 @@ class ClientConfig:
                 f"Invalid rust_log level: {self.rust_log}. Expected one of {valid_rust_log_levels}."
             )
 
-    def update_etcd_config(self, **kwargs) -> ClientConfig:
+    def update_config(self, **kwargs) -> ClientConfig:
         new_op_config = replace(self.etcd_client_config, **kwargs)
         new_config = replace(self, etcd_client_config=new_op_config)
         new_config.validate()
@@ -114,10 +121,3 @@ class ClientConfig:
     def generate_client_toml(self) -> str:
         client_toml_str = toml.dumps(asdict(self.etcd_client_config))
         return client_toml_str
-
-
-@dataclass(frozen=True)
-class RequestInterval:
-    duration_sec: int
-    requests_per_sec: int
-    read_ratio: float

@@ -1,4 +1,4 @@
-use crate::{configs::AutoQuorumConfig, server::MultiLeaderServer};
+use crate::{configs::MultiLeaderConfig, server::MultiLeaderServer};
 use env_logger;
 
 mod configs;
@@ -10,7 +10,7 @@ mod server;
 #[tokio::main]
 pub async fn main() {
     env_logger::init();
-    let server_config = match AutoQuorumConfig::new() {
+    let server_config = match MultiLeaderConfig::new() {
         Ok(parsed_config) => parsed_config,
         Err(e) => panic!("{e}"),
     };

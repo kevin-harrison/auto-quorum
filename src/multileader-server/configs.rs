@@ -1,6 +1,5 @@
 use std::env;
 
-use auto_quorum::common::messages::ReadStrategy;
 use config::{Config, ConfigError, Environment, File};
 use omnipaxos::{
     util::{FlexibleQuorum, NodeId},
@@ -10,7 +9,7 @@ use omnipaxos::{
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct AutoQuorumConfig {
+pub struct MultiLeaderConfig {
     #[serde(flatten)]
     pub server: ServerConfig,
     #[serde(flatten)]
@@ -21,11 +20,7 @@ pub struct AutoQuorumConfig {
 pub struct ClusterConfig {
     pub nodes: Vec<NodeId>,
     pub node_addrs: Vec<String>,
-    pub initial_leader: NodeId,
     pub initial_flexible_quorum: Option<FlexibleQuorum>,
-    pub optimize: Option<bool>,
-    pub optimize_threshold: Option<f64>,
-    pub initial_read_strat: Option<Vec<ReadStrategy>>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -38,7 +33,7 @@ pub struct ServerConfig {
     pub output_filepath: String,
 }
 
-impl Into<OmniPaxosConfig> for AutoQuorumConfig {
+impl Into<OmniPaxosConfig> for MultiLeaderConfig {
     fn into(self) -> OmniPaxosConfig {
         let cluster_config = OmnipaxosClusterConfig {
             configuration_id: 1,
@@ -57,7 +52,7 @@ impl Into<OmniPaxosConfig> for AutoQuorumConfig {
     }
 }
 
-impl AutoQuorumConfig {
+impl MultiLeaderConfig {
     pub fn new() -> Result<Self, ConfigError> {
         let local_config_file = match env::var("SERVER_CONFIG_FILE") {
             Ok(file_path) => file_path,

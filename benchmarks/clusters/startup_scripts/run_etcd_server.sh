@@ -6,13 +6,13 @@ cleanup() {
 }
 cleanup
 
-set -e
+set -eu
 
-# Function to clean up any running server container
-cleanup() {
-    docker kill server > /dev/null 2>&1
-}
-cleanup
+# Generate fresh output directory
+OUTPUT_DIR="./results"
+[ -d $OUTPUT_DIR ] && rm -r $OUTPUT_DIR
+mkdir -p "${OUTPUT_DIR}"
+
 # Ensure the container is killed when this script exits.
 # Note: will only work with ssh with -t flag
 trap cleanup EXIT SIGHUP SIGINT SIGPIPE SIGTERM SIGQUIT
@@ -32,7 +32,8 @@ docker run \
   --env ETCD_NAME=$ETCD_NAME \
   --env ETCD_ADVERTISE_CLIENT_URLS=$ETCD_ADVERTISE_CLIENT_URLS\
   --env ETCD_INITIAL_ADVERTISE_PEER_URLS=$ETCD_INITIAL_ADVERTISE_PEER_URLS \
-  gcr.io/etcd-development/etcd:v3.4.35
+  gcr.io/etcd-development/etcd:v3.4.35 \
+  2> "./results/xerr-server-$SERVER_ID.log"
 
 # TODO: mount the volume to a temp file system for in-memory etcd
 # https://github.com/kubernetes-sigs/kind/issues/845

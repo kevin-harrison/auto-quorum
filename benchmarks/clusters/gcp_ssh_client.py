@@ -1,9 +1,7 @@
-import signal
 import subprocess
-import sys
 import time
 
-from gcp_cluster import GcpCluster
+from .gcp_cluster import GcpCluster
 
 
 class GcpClusterSSHClient:
@@ -16,12 +14,9 @@ class GcpClusterSSHClient:
     _processes: dict[str, tuple[subprocess.Popen, str, str]]
     _gcp_cluster: GcpCluster
 
-    def __init__(self, gcp_cluster: GcpCluster, kill_process_command: str):
+    def __init__(self, gcp_cluster: GcpCluster):
         self._processes = {}
         self._gcp_cluster = gcp_cluster
-        self._kill_command = kill_process_command
-        signal.signal(signal.SIGINT, self._cleanup_handler)
-        signal.signal(signal.SIGTERM, self._cleanup_handler)
 
     def start_process(self, process_id: str, instance_name: str, ssh_command: str):
         running_process = self._processes.get(process_id)
@@ -42,25 +37,13 @@ class GcpClusterSSHClient:
         for id in process_ids:
             self.restart_process(id)
 
-    def stop_process(self, process_id) -> subprocess.Popen:
-        process, instance_name, _ = self._get_process(process_id)
-        process.terminate()
-        self._processes.pop(process_id)
-        kill_process = self._gcp_cluster.ssh_command(instance_name, self._kill_command)
-        return kill_process
-
-    def stop_processes(self, process_ids: list[str]):
-        processes = []
-        for process_id in process_ids:
-            kill_process = self.stop_process(process_id)
-            processes.append(kill_process)
-        if len(processes) > 0:
-            print("Shuting down remote processes...")
-        for process in processes:
-            process.wait()
+    def stop_process(self, process_id):
+        if (process := self._processes.get(process_id)) is not None:
+            process[0].terminate()
+            self._processes.pop(process_id)
 
     def await_processes(self, process_ids: list[str], timeout: int = 600):
-        print(f"Awaiting processes: {process_ids} ...")
+        print(f"Awaiting processes: {process_ids}")
         for id in process_ids:
             process, _, _ = self._get_process(id)
             process.wait(timeout=timeout)
@@ -118,16 +101,11 @@ class GcpClusterSSHClient:
     def clear(self):
         self._processes.clear()
 
-    def clear_processes(self, processes: list[str]):
-        for id in processes:
-            _ = self._processes.pop(id)
+    def clear_process(self, process_id: str):
+        _ = self._processes.pop(process_id)
 
     def _get_process(self, process_id: str) -> tuple[subprocess.Popen, str, str]:
         process = self._processes.get(process_id)
         if process is None:
             raise ValueError(f"Process {process_id} doesn't exist")
         return process
-
-    def _cleanup_handler(self, signum, frame):
-        self.stop_processes(list(self._processes.keys()))
-        sys.exit(0)

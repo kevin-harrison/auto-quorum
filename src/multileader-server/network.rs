@@ -20,7 +20,7 @@ use tokio::{
 use tokio::{sync::mpsc, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 
-use crate::configs::AutoQuorumConfig;
+use crate::configs::MultiLeaderConfig;
 
 pub struct Network {
     peers: Vec<NodeId>,
@@ -35,7 +35,7 @@ pub struct Network {
     cancel_token: CancellationToken,
 }
 
-fn get_addrs(config: AutoQuorumConfig) -> (SocketAddr, Vec<SocketAddr>) {
+fn get_addrs(config: MultiLeaderConfig) -> (SocketAddr, Vec<SocketAddr>) {
     let listen_address_str = format!(
         "{}:{}",
         config.server.listen_address, config.server.listen_port
@@ -56,7 +56,7 @@ fn get_addrs(config: AutoQuorumConfig) -> (SocketAddr, Vec<SocketAddr>) {
 }
 
 impl Network {
-    pub async fn new(config: AutoQuorumConfig, batch_size: usize) -> Self {
+    pub async fn new(config: MultiLeaderConfig, batch_size: usize) -> Self {
         let (listen_address, node_addresses) = get_addrs(config.clone());
         let id = config.server.server_id;
         let peer_addresses: Vec<(NodeId, SocketAddr)> = config

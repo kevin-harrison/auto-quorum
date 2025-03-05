@@ -17,5 +17,7 @@ export OSLOGIN_UID=""
 # The names used for the client and server Docker images when they are
 # pushed to the GCP Artifact Registry. See `./push-client-image.sh`
 # and `./push-server-image.sh`.
-export CLIENT_DOCKER_IMAGE_NAME="gcr.io/$PROJECT_ID/${OSLOGIN_UID}_omnipaxos_client"
-export SERVER_DOCKER_IMAGE_NAME="gcr.io/$PROJECT_ID/${OSLOGIN_UID}_omnipaxos_server"
+export CLIENT_DOCKER_IMAGE_NAME="gcr.io/$PROJECT_ID/${OSLOGIN_UID}_autoquorum_client"
+export SERVER_DOCKER_IMAGE_NAME="gcr.io/$PROJECT_ID/${OSLOGIN_UID}_autoquorum_server"
+export MULTILEADER_SERVER_DOCKER_IMAGE_NAME="gcr.io/$PROJECT_ID/${OSLOGIN_UID}_autoquorum_multileader_server"
+export ETCD_CLIENT_DOCKER_IMAGE_NAME="gcr.io/$PROJECT_ID/${OSLOGIN_UID}_etcd_client"

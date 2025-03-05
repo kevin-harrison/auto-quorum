@@ -1,24 +1,30 @@
 import subprocess
 from pathlib import Path
 
-from etcd_configs import ClientConfig, ClusterConfig, RequestInterval, ServerConfig
-from gcp_cluster import GcpCluster, InstanceConfig
-from gcp_ssh_client import GcpClusterSSHClient
+from clusters.base_cluster import ClientServerCluster
+
+from .etcd_configs import ClientConfig, ClusterConfig, RequestInterval, ServerConfig
+from .gcp_cluster import InstanceConfig
+from .startup_scripts import (
+    INSTANCE_STARTUP_SCRIPT,
+    RUN_CLIENT_SCRIPT,
+    RUN_ETCD_SERVER_SCRIPT,
+)
 
 
-class EtcdCluster:
+class EtcdCluster(ClientServerCluster[ClusterConfig]):
     """
-    Orchestration class for managing an AutoQuorum cluster on GCP.
+    Orchestration class for managing an ETCD cluster on GCP.
 
-    This class automates the setup, deployment, and management of AutoQuorum servers and clients
+    This class automates the setup, deployment, and management of ETCD servers and clients
     on Google Cloud Platform (GCP) instances. It abstracts the steps required to push Docker images,
-    start instances, configure and launch AutoQuorum containers, and manage logs and shutdown operations.
+    start instances, configure and launch ETCD containers, and manage logs and shutdown operations.
 
     Deployment Steps:
     1.   Configure project settings (See `./scripts/project_env.sh`). Configure gcloud authentication (see `./scripts/auth.sh`).
-    2.   Push AutoQuorum server and client Docker images to GCR (Google Cloud Registry).
+    2.   Push ETCD server and client Docker images to GCR (Google Cloud Registry).
          See `./scripts/push-server-image.sh` and `./scripts/push-client-image.sh` for details.
-    3-4. `__init__` Initializes the cluster by creating GCP instances (using the GcpCluster class) for AutoQuorum servers and clients.
+    3-4. `__init__` Initializes the cluster by creating GCP instances (using the GcpCluster class) for ETCD servers and clients.
          The instances will run startup scripts (passed via ClusterConfig) to configure Docker for the gcloud OS login user and assign
          DNS names to the servers.
     5-6. Use `run()` to SSH into client and server instances, pass configuration files,
@@ -28,142 +34,54 @@ class EtcdCluster:
     """
 
     _cluster_config: ClusterConfig
-    _gcp_cluster: GcpCluster
 
-    def __init__(self, project_id: str, cluster_config: ClusterConfig):
-        self._cluster_config = cluster_config
-        instance_configs = [
-            c.instance_config for c in cluster_config.server_configs.values()
-        ]
-        instance_configs.extend(
-            [c.instance_config for c in cluster_config.client_configs.values()]
-        )
-        self._gcp_cluster = GcpCluster(project_id, instance_configs)
-        kill_command = (
-            "docker kill client > /dev/null 2>&1; docker kill server > /dev/null 2>&1"
-        )
-        self._gcp_ssh_client = GcpClusterSSHClient(self._gcp_cluster, kill_command)
+    # def _get_logs(self, dest_directory: Path):
+    #     # Make sure destination directory exists
+    #     subprocess.run(["mkdir", "-p", dest_directory])
+    #     instance_results_dir = "./results"
+    #     processes = []
+    #     for config in self._cluster_config.server_configs.values():
+    #         name = config.instance_config.name
+    #         scp_process = self._gcp_cluster.scp_command(
+    #             name, instance_results_dir, dest_directory
+    #         )
+    #         processes.append(scp_process)
+    #     for config in self._cluster_config.client_configs.values():
+    #         name = config.instance_config.name
+    #         scp_process = self._gcp_cluster.scp_command(
+    #             name, instance_results_dir, dest_directory
+    #         )
+    #         processes.append(scp_process)
+    #     successes = 0
+    #     for process in processes:
+    #         process.wait()
+    #         if process.returncode == 0:
+    #             successes += 1
+    #     print(f"Collected logs from {successes} instances")
 
-    def run(self, logs_directory: Path, pull_images: bool = False):
-        """
-        Starts servers and clients but only waits for client processes to exit before
-        killing remote processes and pulling logs.
-        """
-        server_process_ids = self._start_servers()
-        client_process_ids = self._start_clients(pull_images=pull_images)
-        clients_finished = self._gcp_ssh_client.await_processes_concurrent(
-            client_process_ids
-        )
-        if clients_finished:
-            self._gcp_ssh_client.clear_processes(client_process_ids)
-            self._gcp_ssh_client.stop_processes(server_process_ids)
-        else:
-            self._gcp_ssh_client.stop_processes(server_process_ids + client_process_ids)
-        self._get_logs(logs_directory)
-
-    def change_cluster_config(self, **kwargs):
-        self._cluster_config = self._cluster_config.update_etcd_config(**kwargs)
-        for k, v in kwargs:
-            if k == "initial_leader":
-                for client_id in self._cluster_config.client_configs.keys():
-                    self.change_client_config(client_id, k=f"node{v}")
-
-    def change_server_config(self, server_id: int, **kwargs):
-        server_config = self._get_server_config(server_id)
-        self._cluster_config.server_configs[server_id] = (
-            server_config.update_etcd_config(**kwargs)
-        )
-
-    def change_client_config(self, client_id: int, **kwargs):
-        client_config = self._get_client_config(client_id)
-        self._cluster_config.client_configs[client_id] = (
-            client_config.update_etcd_config(**kwargs)
-        )
-
-    def shutdown(self):
-        instance_names = [
-            c.instance_config.name for c in self._cluster_config.server_configs.values()
-        ]
-        client_names = [
-            c.instance_config.name for c in self._cluster_config.client_configs.values()
-        ]
-        instance_names.extend(client_names)
-        self._gcp_cluster.shutdown_instances(instance_names)
-
-    def _start_servers(self) -> list[str]:
-        process_ids = []
-        for id, config in self._cluster_config.server_configs.items():
-            process_id = f"server-{id}"
-            instance_name = config.instance_config.name
-            ssh_command = self._start_server_command(id)
-            self._gcp_ssh_client.start_process(process_id, instance_name, ssh_command)
-            process_ids.append(process_id)
-        return process_ids
-
-    def _start_clients(self, pull_images: bool = False):
-        process_ids = []
-        for id, config in self._cluster_config.client_configs.items():
-            process_id = f"client-{id}"
-            instance_name = config.instance_config.name
-            ssh_command = self._start_client_command(id, pull_image=pull_images)
-            self._gcp_ssh_client.start_process(process_id, instance_name, ssh_command)
-            process_ids.append(process_id)
-        return process_ids
-
-    def _get_logs(self, dest_directory: Path):
-        # Make sure destination directory exists
-        subprocess.run(["mkdir", "-p", dest_directory])
-        instance_results_dir = "./results"
-        processes = []
-        for config in self._cluster_config.server_configs.values():
-            name = config.instance_config.name
-            scp_process = self._gcp_cluster.scp_command(
-                name, instance_results_dir, dest_directory
-            )
-            processes.append(scp_process)
-        for config in self._cluster_config.client_configs.values():
-            name = config.instance_config.name
-            scp_process = self._gcp_cluster.scp_command(
-                name, instance_results_dir, dest_directory
-            )
-            processes.append(scp_process)
-        successes = 0
-        for process in processes:
-            process.wait()
-            if process.returncode == 0:
-                successes += 1
-        print(f"Collected logs from {successes} instances")
-
-    def _get_server_config(self, server_id: int) -> ServerConfig:
-        server_config = self._cluster_config.server_configs.get(server_id)
-        if server_config is None:
-            raise ValueError(f"Server {server_id} doesn't exist")
-        return server_config
-
-    def _get_client_config(self, client_id: int) -> ClientConfig:
-        client_config = self._cluster_config.client_configs.get(client_id)
-        if client_config is None:
-            raise ValueError(f"Client {client_id} doesn't exist")
-        return client_config
-
-    def _start_server_command(self, server_id: int) -> str:
-        config = self._get_server_config(server_id)
+    def _start_server_command(self, server_id: int, pull_image: bool = False) -> str:
+        config = self._cluster_config.server_configs[server_id]
         etcd_config = config.etcd_server_config
         start_server_command = (
-            f"cat <<EOF > run_container.sh\n{config.run_script}\nEOF\n &&",
+            f"{{ cat <<'EOF' > run_container.sh\n{config.run_script}\nEOF\n}} &&",
+            f"SERVER_ID={server_id}",
             f"ETCD_INITIAL_CLUSTER={etcd_config.initial_cluster}",
             f"ETCD_NAME={etcd_config.name}",
             f"ETCD_ADVERTISE_CLIENT_URLS={etcd_config.advertise_client_urls}",
             f"ETCD_INITIAL_ADVERTISE_PEER_URLS={etcd_config.initial_advertise_peer_urls}",
             "bash ./run_container.sh",
         )
+
+        # a = " ".join(start_server_command)
+        # print(a)
+        # raise ValueError()
         return " ".join(start_server_command)
 
     def _start_client_command(self, client_id: int, pull_image: bool = False) -> str:
-        config = self._get_client_config(client_id)
+        config = self._cluster_config.client_configs[client_id]
         client_config_toml = config.generate_client_toml()
         start_client_command = (
-            f"cat <<EOF > run_container.sh\n{config.run_script}\nEOF\n &&",
+            f"{{ cat <<'EOF' > run_container.sh\n{config.run_script}\nEOF\n}} &&",
             f"PULL_IMAGE={'true' if pull_image else 'false'}",
             f"CLIENT_CONFIG_TOML=$(cat <<EOF\n{client_config_toml}\nEOF\n)",
             f"RUST_LOG={config.rust_log}",
@@ -175,8 +93,8 @@ class EtcdCluster:
 
 class EtcdClusterBuilder:
     """
-    Builder class for defining and validating configurations to start a AutoQuorumCluster.
-    Relies on environment variables from `./scripts/project_env.sh` to configure settings.
+    Builder class for defining and validating configurations to start a EtcdCluster.
+    Relies on environment variables from `../scripts/project_env.sh` to configure settings.
     """
 
     def __init__(self, cluster_id: int) -> None:
@@ -216,13 +134,15 @@ class EtcdClusterBuilder:
         server_address = f"{instance_config.dns_name}.internal.zone."
         server_config = ServerConfig(
             instance_config=instance_config,
-            server_address=f"{server_address:2379}",
+            server_address=f"{server_address}:2379",
             etcd_server_config=ServerConfig.EtcdServerConfig(
                 name=f"node{server_id}",
                 advertise_client_urls=f"http://{server_address}:2379",
                 initial_advertise_peer_urls=f"http://{server_address}:2380",
                 initial_cluster="",  # dummy val
             ),
+            output_dir="./results",
+            kill_command="docker kill server > /dev/null 2>&1",
             run_script=self._get_run_server_script(),
         )
         self._server_configs[server_id] = server_config
@@ -262,6 +182,8 @@ class EtcdClusterBuilder:
                 summary_filepath=f"client-{server_id}.json",
                 output_filepath=f"client-{server_id}.csv",
             ),
+            output_dir="./results",
+            kill_command="docker kill client > /dev/null 2>&1",
             run_script=self._get_run_client_script(),
             rust_log=rust_log,
         )
@@ -281,7 +203,7 @@ class EtcdClusterBuilder:
             server_config = self._server_configs[
                 client_config.etcd_client_config.server_id
             ]
-            self._client_configs[client_id] = client_config.update_etcd_config(
+            self._client_configs[client_id] = client_config.update_config(
                 server_name=server_config.etcd_server_config.name,
                 server_address=server_config.server_address,
                 initial_leader=f"node{self._initial_leader}",
@@ -294,7 +216,7 @@ class EtcdClusterBuilder:
             initial_cluster.append(address_mapping)
         initial_cluster = ",".join(initial_cluster)
         for server_id, server_config in self._server_configs.items():
-            self._server_configs[server_id] = server_config.update_etcd_config(
+            self._server_configs[server_id] = server_config.update_config(
                 initial_cluster=initial_cluster
             )
 
@@ -317,9 +239,11 @@ class EtcdClusterBuilder:
             "OSLOGIN_UID",
             "ETCD_CLIENT_DOCKER_IMAGE_NAME",
         ]
+        base_dir = Path(__file__).resolve().parent
+        env_path = (base_dir / ".." / "scripts" / "project_env.sh").resolve()
         env_vals = {}
         process = subprocess.run(
-            ["bash", "-c", "source ./scripts/project_env.sh && env"],
+            ["bash", "-c", f"source {env_path} && env"],
             check=True,
             stdout=subprocess.PIPE,
             text=True,
@@ -330,22 +254,20 @@ class EtcdClusterBuilder:
                 env_keys.remove(key)
                 env_vals[key] = value
         for key in env_keys:
-            raise ValueError(
-                f"{key} env var must be set. Sourcing from ./scripts/project_env.sh"
-            )
+            raise ValueError(f"{key} env var must be set. Sourcing from {env_path}")
         return env_vals
 
     @staticmethod
     def _get_instance_startup_script() -> str:
-        with open("./startup_scripts/instance_startup_script.sh", "r") as f:
+        with open(INSTANCE_STARTUP_SCRIPT, "r") as f:
             return f.read()
 
     @staticmethod
     def _get_run_server_script() -> str:
-        with open("./startup_scripts/run_etcd_server.sh", "r") as f:
+        with open(RUN_ETCD_SERVER_SCRIPT, "r") as f:
             return f.read()
 
     @staticmethod
     def _get_run_client_script() -> str:
-        with open("./startup_scripts/run_client.sh", "r") as f:
+        with open(RUN_CLIENT_SCRIPT, "r") as f:
             return f.read()

@@ -5,18 +5,22 @@ from enum import Enum
 
 import toml
 
-from gcp_cluster import InstanceConfig
+from clusters.base_cluster import (
+    ClientConfigProtocol,
+    ClusterConfigProtocol,
+    ServerConfigProtocol,
+)
+
+from .gcp_cluster import InstanceConfig
 
 
 @dataclass(frozen=True)
-class ClusterConfig:
+class ClusterConfig(ClusterConfigProtocol):
     autoquorum_cluster_config: AutoQuorumClusterConfig
     server_configs: dict[int, ServerConfig]
     client_configs: dict[int, ClientConfig]
     client_image: str
     server_image: str
-    multileader_server_image: str
-    multileader: bool
 
     @dataclass(frozen=True)
     class AutoQuorumClusterConfig:
@@ -82,7 +86,7 @@ class ClusterConfig:
                 f"Cluster nodes {aq_config.nodes} must match defined server ids {server_ids}"
             )
 
-    def update_autoquorum_config(self, **kwargs) -> ClusterConfig:
+    def update_config(self, **kwargs) -> ClusterConfig:
         new_op_config = replace(self.autoquorum_cluster_config, **kwargs)
         new_config = replace(self, autoquorum_cluster_config=new_op_config)
         new_config.validate()
@@ -99,10 +103,12 @@ class ClusterConfig:
 
 
 @dataclass(frozen=True)
-class ServerConfig:
+class ServerConfig(ServerConfigProtocol):
     instance_config: InstanceConfig
     autoquorum_server_config: AutoQuorumServerConfig
     run_script: str
+    output_dir: str
+    kill_command: str
     rust_log: str
     server_address: str
 
@@ -136,7 +142,7 @@ class ServerConfig:
                 f"Invalid rust_log level: {self.rust_log}. Expected one of {valid_rust_log_levels}."
             )
 
-    def update_autoquorum_config(self, **kwargs) -> ServerConfig:
+    def update_config(self, **kwargs) -> ServerConfig:
         new_op_config = replace(self.autoquorum_server_config, **kwargs)
         new_config = replace(self, autoquorum_server_config=new_op_config)
         new_config.validate()
@@ -148,10 +154,12 @@ class ServerConfig:
 
 
 @dataclass(frozen=True)
-class ClientConfig:
+class ClientConfig(ClientConfigProtocol):
     instance_config: InstanceConfig
     autoquorum_client_config: AutoQuorumClientConfig
     run_script: str
+    output_dir: str
+    kill_command: str
     rust_log: str = "info"
 
     @dataclass(frozen=True)
@@ -186,7 +194,7 @@ class ClientConfig:
                 f"Invalid rust_log level: {self.rust_log}. Expected one of {valid_rust_log_levels}."
             )
 
-    def update_autoquorum_config(self, **kwargs) -> ClientConfig:
+    def update_config(self, **kwargs) -> ClientConfig:
         new_op_config = replace(self.autoquorum_client_config, **kwargs)
         new_config = replace(self, autoquorum_client_config=new_op_config)
         new_config.validate()

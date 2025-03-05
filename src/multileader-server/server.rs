@@ -1,5 +1,5 @@
 use crate::{
-    configs::AutoQuorumConfig,
+    configs::MultiLeaderConfig,
     database::Database,
     metrics::{ClusterMetrics, MetricsHeartbeatServer},
     network::Network,
@@ -36,11 +36,11 @@ pub struct MultiLeaderServer {
     strategy: ClusterStrategy,
     experiment_state: ExperimentState,
     output_file: File,
-    config: AutoQuorumConfig,
+    config: MultiLeaderConfig,
 }
 
 impl MultiLeaderServer {
-    pub async fn new(config: AutoQuorumConfig) -> Self {
+    pub async fn new(config: MultiLeaderConfig) -> Self {
         let mut omnipaxos_instances = vec![];
         for _ in config.cluster.nodes.iter() {
             let storage: MemoryStorage<Command> = MemoryStorage::default();
@@ -399,7 +399,7 @@ enum State {
 }
 
 impl ExperimentState {
-    fn initial_state(config: AutoQuorumConfig) -> Self {
+    fn initial_state(config: MultiLeaderConfig) -> Self {
         let node_states = vec![State::Running; config.cluster.nodes.len()];
         let client_states = vec![State::Running; config.server.num_clients];
         ExperimentState {
@@ -457,7 +457,7 @@ pub struct ClusterStrategy {
 }
 
 impl ClusterStrategy {
-    pub fn initial_strategy(config: AutoQuorumConfig) -> Self {
+    pub fn initial_strategy(config: MultiLeaderConfig) -> Self {
         let num_nodes = config.cluster.nodes.len();
         let init_read_quorum = match config.cluster.initial_flexible_quorum {
             Some(flex_quroum) => flex_quroum.read_quorum_size,

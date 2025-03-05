@@ -5,7 +5,7 @@ use auto_quorum::common::{
 use serde::Serialize;
 use tokio::time::Instant;
 
-use crate::configs::AutoQuorumConfig;
+use crate::configs::MultiLeaderConfig;
 
 const LATENCY_CAP: f64 = 9999.;
 
@@ -73,7 +73,7 @@ impl ClusterMetrics {
 }
 
 impl MetricsHeartbeatServer {
-    pub fn new(config: AutoQuorumConfig) -> Self {
+    pub fn new(config: MultiLeaderConfig) -> Self {
         let num_nodes = config.cluster.nodes.len();
         let peers = config
             .cluster

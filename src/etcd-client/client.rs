@@ -24,6 +24,7 @@ pub struct Client {
 impl Client {
     pub async fn new(config: ClientConfig) -> Result<Client, EtcdError> {
         let (response_sender, response_receiver) = tokio::sync::mpsc::channel(1000);
+        info!("{} : Connecting to server", config.server_id);
         Ok(Client {
             id: config.server_id,
             etcd: EtcdClient::connect([config.server_address.clone()], None).await?,

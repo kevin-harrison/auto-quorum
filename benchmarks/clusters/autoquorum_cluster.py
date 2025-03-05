@@ -1,7 +1,7 @@
 import subprocess
 from pathlib import Path
 
-from autoquorum_configs import (
+from .autoquorum_configs import (
     ClientConfig,
     ClusterConfig,
     FlexibleQuorum,
@@ -9,11 +9,16 @@ from autoquorum_configs import (
     RequestInterval,
     ServerConfig,
 )
-from gcp_cluster import GcpCluster, InstanceConfig
-from gcp_ssh_client import GcpClusterSSHClient
+from .base_cluster import ClientServerCluster
+from .gcp_cluster import InstanceConfig
+from .startup_scripts import (
+    INSTANCE_STARTUP_SCRIPT,
+    RUN_CLIENT_SCRIPT,
+    RUN_SERVER_SCRIPT,
+)
 
 
-class AutoQuorumCluster:
+class AutoQuorumCluster(ClientServerCluster[ClusterConfig]):
     """
     Orchestration class for managing an AutoQuorum cluster on GCP.
 
@@ -35,134 +40,16 @@ class AutoQuorumCluster:
     """
 
     _cluster_config: ClusterConfig
-    _gcp_cluster: GcpCluster
-
-    def __init__(self, project_id: str, cluster_config: ClusterConfig):
-        self._cluster_config = cluster_config
-        instance_configs = [
-            c.instance_config for c in cluster_config.server_configs.values()
-        ]
-        instance_configs.extend(
-            [c.instance_config for c in cluster_config.client_configs.values()]
-        )
-        self._gcp_cluster = GcpCluster(project_id, instance_configs)
-        kill_command = (
-            "docker kill client > /dev/null 2>&1; docker kill server > /dev/null 2>&1"
-        )
-        self._gcp_ssh_client = GcpClusterSSHClient(self._gcp_cluster, kill_command)
-
-    def run(self, logs_directory: Path, pull_images: bool = False):
-        """
-        Starts servers and clients but only waits for client processes to exit before
-        killing remote processes and pulling logs.
-        """
-        server_process_ids = self._start_servers(pull_images=pull_images)
-        client_process_ids = self._start_clients(pull_images=pull_images)
-        clients_finished = self._gcp_ssh_client.await_processes_concurrent(
-            client_process_ids
-        )
-        if clients_finished:
-            self._gcp_ssh_client.clear_processes(client_process_ids)
-            self._gcp_ssh_client.stop_processes(server_process_ids)
-        else:
-            self._gcp_ssh_client.stop_processes(server_process_ids + client_process_ids)
-        self._get_logs(logs_directory)
-
-    def change_cluster_config(self, **kwargs):
-        self._cluster_config = self._cluster_config.update_autoquorum_config(**kwargs)
-
-    def change_server_config(self, server_id: int, **kwargs):
-        server_config = self._get_server_config(server_id)
-        self._cluster_config.server_configs[server_id] = (
-            server_config.update_autoquorum_config(**kwargs)
-        )
-
-    def change_client_config(self, client_id: int, **kwargs):
-        client_config = self._get_client_config(client_id)
-        self._cluster_config.client_configs[client_id] = (
-            client_config.update_autoquorum_config(**kwargs)
-        )
-
-    def shutdown(self):
-        instance_names = [
-            c.instance_config.name for c in self._cluster_config.server_configs.values()
-        ]
-        client_names = [
-            c.instance_config.name for c in self._cluster_config.client_configs.values()
-        ]
-        instance_names.extend(client_names)
-        self._gcp_cluster.shutdown_instances(instance_names)
-
-    def _start_servers(self, pull_images: bool = False) -> list[str]:
-        process_ids = []
-        for id, config in self._cluster_config.server_configs.items():
-            process_id = f"server-{id}"
-            instance_name = config.instance_config.name
-            ssh_command = self._start_server_command(id, pull_image=pull_images)
-            self._gcp_ssh_client.start_process(process_id, instance_name, ssh_command)
-            process_ids.append(process_id)
-        return process_ids
-
-    def _start_clients(self, pull_images: bool = False):
-        process_ids = []
-        for id, config in self._cluster_config.client_configs.items():
-            process_id = f"client-{id}"
-            instance_name = config.instance_config.name
-            ssh_command = self._start_client_command(id, pull_image=pull_images)
-            self._gcp_ssh_client.start_process(process_id, instance_name, ssh_command)
-            process_ids.append(process_id)
-        return process_ids
-
-    def _get_logs(self, dest_directory: Path):
-        # Make sure destination directory exists
-        subprocess.run(["mkdir", "-p", dest_directory])
-        instance_results_dir = "./results"
-        processes = []
-        for config in self._cluster_config.server_configs.values():
-            name = config.instance_config.name
-            scp_process = self._gcp_cluster.scp_command(
-                name, instance_results_dir, dest_directory
-            )
-            processes.append(scp_process)
-        for config in self._cluster_config.client_configs.values():
-            name = config.instance_config.name
-            scp_process = self._gcp_cluster.scp_command(
-                name, instance_results_dir, dest_directory
-            )
-            processes.append(scp_process)
-        successes = 0
-        for process in processes:
-            process.wait()
-            if process.returncode == 0:
-                successes += 1
-        print(f"Collected logs from {successes} instances")
-
-    def _get_server_config(self, server_id: int) -> ServerConfig:
-        server_config = self._cluster_config.server_configs.get(server_id)
-        if server_config is None:
-            raise ValueError(f"Server {server_id} doesn't exist")
-        return server_config
-
-    def _get_client_config(self, client_id: int) -> ClientConfig:
-        client_config = self._cluster_config.client_configs.get(client_id)
-        if client_config is None:
-            raise ValueError(f"Client {client_id} doesn't exist")
-        return client_config
 
     def _start_server_command(self, server_id: int, pull_image: bool = False) -> str:
-        config = self._get_server_config(server_id)
+        config = self._cluster_config.server_configs[server_id]
         aq_config = config.autoquorum_server_config
         server_config_toml = config.generate_server_toml()
         cluster_config_toml = self._cluster_config.generate_cluster_toml()
-        server_image = (
-            self._cluster_config.multileader_server_image
-            if self._cluster_config.multileader
-            else self._cluster_config.server_image
-        )
         start_server_command = (
-            f"cat <<EOF > run_container.sh\n{config.run_script}\nEOF\n &&",
+            f"{{ cat <<'EOF' > run_container.sh\n{config.run_script}\nEOF\n}} &&",
             f"PULL_IMAGE={'true' if pull_image else 'false'}",
-            f"SERVER_IMAGE={server_image}",
+            f"SERVER_IMAGE={self._cluster_config.server_image}",
             f"SERVER_CONFIG_TOML=$(cat <<EOF\n{server_config_toml}\nEOF\n)",
             f"CLUSTER_CONFIG_TOML=$(cat <<EOF\n{cluster_config_toml}\nEOF\n)",
             f"LISTEN_PORT={aq_config.listen_port}",
@@ -173,10 +60,10 @@ class AutoQuorumCluster:
         return " ".join(start_server_command)
 
     def _start_client_command(self, client_id: int, pull_image: bool = False) -> str:
-        config = self._get_client_config(client_id)
+        config = self._cluster_config.client_configs[client_id]
         client_config_toml = config.generate_client_toml()
         start_client_command = (
-            f"cat <<EOF > run_container.sh\n{config.run_script}\nEOF\n &&",
+            f"{{ cat <<'EOF' > run_container.sh\n{config.run_script}\nEOF\n}} &&",
             f"PULL_IMAGE={'true' if pull_image else 'false'}",
             f"CLIENT_CONFIG_TOML=$(cat <<EOF\n{client_config_toml}\nEOF\n)",
             f"RUST_LOG={config.rust_log}",
@@ -189,7 +76,7 @@ class AutoQuorumCluster:
 class AutoQuorumClusterBuilder:
     """
     Builder class for defining and validating configurations to start a AutoQuorumCluster.
-    Relies on environment variables from `./scripts/project_env.sh` to configure settings.
+    Relies on environment variables from `../scripts/project_env.sh` to configure settings.
     """
 
     def __init__(self, cluster_id: int) -> None:
@@ -200,9 +87,6 @@ class AutoQuorumClusterBuilder:
         self._gcloud_ssh_user = env_vals["OSLOGIN_USERNAME"]
         self._gcloud_oslogin_uid = env_vals["OSLOGIN_UID"]
         self._server_docker_image_name = env_vals["SERVER_DOCKER_IMAGE_NAME"]
-        self._multileader_server_docker_image_name = env_vals[
-            "MULTILEADER_SERVER_DOCKER_IMAGE_NAME"
-        ]
         self._client_docker_image_name = env_vals["CLIENT_DOCKER_IMAGE_NAME"]
         self._instance_startup_script = self._get_instance_startup_script()
         self._server_configs: dict[int, ServerConfig] = {}
@@ -214,7 +98,6 @@ class AutoQuorumClusterBuilder:
         self._optimize_setting: bool | None = None
         self._optimize_threshold: float | None = None
         self._initial_read_strategy: list[ReadStrategy] | None = None
-        self._multileader: bool = False
 
     def server(
         self,
@@ -251,6 +134,8 @@ class AutoQuorumClusterBuilder:
                 num_clients=0,  # dummy value
                 output_filepath=f"server-{server_id}.json",
             ),
+            output_dir="./results",
+            kill_command="docker kill server > /dev/null 2>&1",
             run_script=self._get_run_server_script(),
             rust_log=rust_log,
         )
@@ -289,6 +174,8 @@ class AutoQuorumClusterBuilder:
                 summary_filepath=f"client-{server_id}.json",
                 output_filepath=f"client-{server_id}.csv",
             ),
+            output_dir="./results",
+            kill_command="docker kill client > /dev/null 2>&1",
             run_script=self._get_run_client_script(),
             rust_log=rust_log,
         )
@@ -315,10 +202,6 @@ class AutoQuorumClusterBuilder:
         self._optimize_threshold = threshold
         return self
 
-    def multileader(self, multileader: bool):
-        self._multileader = multileader
-        return self
-
     def build(self) -> AutoQuorumCluster:
         if self._initial_leader is None:
             raise ValueError("Need to set cluster's initial leader")
@@ -333,7 +216,7 @@ class AutoQuorumClusterBuilder:
                 )
             )
             total_matches = server_id_matches
-            self._server_configs[server_id] = server_config.update_autoquorum_config(
+            self._server_configs[server_id] = server_config.update_config(
                 num_clients=total_matches
             )
         # Add server_address to client configs
@@ -341,7 +224,7 @@ class AutoQuorumClusterBuilder:
             server_config = self._server_configs[
                 client_config.autoquorum_client_config.server_id
             ]
-            self._client_configs[client_id] = client_config.update_autoquorum_config(
+            self._client_configs[client_id] = client_config.update_config(
                 server_address=server_config.server_address
             )
         nodes = sorted(self._server_configs.keys())
@@ -361,10 +244,8 @@ class AutoQuorumClusterBuilder:
             ),
             server_configs=self._server_configs,
             client_configs=self._client_configs,
-            multileader=self._multileader,
             client_image=self._client_docker_image_name,
             server_image=self._server_docker_image_name,
-            multileader_server_image=self._multileader_server_docker_image_name,
         )
         return AutoQuorumCluster(self._project_id, cluster_config)
 
@@ -377,11 +258,12 @@ class AutoQuorumClusterBuilder:
             "OSLOGIN_UID",
             "CLIENT_DOCKER_IMAGE_NAME",
             "SERVER_DOCKER_IMAGE_NAME",
-            "MULTILEADER_SERVER_DOCKER_IMAGE_NAME",
         ]
+        base_dir = Path(__file__).resolve().parent
+        env_path = (base_dir / ".." / "scripts" / "project_env.sh").resolve()
         env_vals = {}
         process = subprocess.run(
-            ["bash", "-c", "source ./scripts/project_env.sh && env"],
+            ["bash", "-c", f"source {env_path} && env"],
             check=True,
             stdout=subprocess.PIPE,
             text=True,
@@ -392,22 +274,20 @@ class AutoQuorumClusterBuilder:
                 env_keys.remove(key)
                 env_vals[key] = value
         for key in env_keys:
-            raise ValueError(
-                f"{key} env var must be set. Sourcing from ./scripts/project_env.sh"
-            )
+            raise ValueError(f"{key} env var must be set. Sourcing from {env_path}")
         return env_vals
 
     @staticmethod
     def _get_instance_startup_script() -> str:
-        with open("./startup_scripts/instance_startup_script.sh", "r") as f:
+        with open(INSTANCE_STARTUP_SCRIPT, "r") as f:
             return f.read()
 
     @staticmethod
     def _get_run_server_script() -> str:
-        with open("./startup_scripts/run_server.sh", "r") as f:
+        with open(RUN_SERVER_SCRIPT, "r") as f:
             return f.read()
 
     @staticmethod
     def _get_run_client_script() -> str:
-        with open("./startup_scripts/run_client.sh", "r") as f:
+        with open(RUN_CLIENT_SCRIPT, "r") as f:
             return f.read()
