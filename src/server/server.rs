@@ -15,11 +15,7 @@ use omnipaxos::{
 };
 use omnipaxos_storage::memory_storage::MemoryStorage;
 use serde::Serialize;
-use std::{
-    fs::File,
-    io::{Seek, SeekFrom, Write},
-    time::Duration,
-};
+use std::{fs::File, io::Write, time::Duration};
 use tokio::time::interval;
 
 type OmniPaxosInstance = OmniPaxos<Command, MemoryStorage<Command>>;
@@ -74,7 +70,6 @@ impl OmniPaxosServer {
     }
 
     pub async fn run(&mut self) {
-        self.start_log();
         if self.config.server.num_clients == 0 {
             self.experiment_state.node_finished(self.id);
             for peer in self.omnipaxos.get_peers() {
@@ -84,16 +79,8 @@ impl OmniPaxosServer {
         }
         let mut client_msg_buf = Vec::with_capacity(NETWORK_BATCH_SIZE);
         let mut cluster_msg_buf = Vec::with_capacity(NETWORK_BATCH_SIZE);
-        // We don't use Omnipaxos leader election and instead force an initial leader
-        // Once the leader is established it chooses a synchronization point which the
-        // followers relay to their clients to begin the experiment.
-        if self.config.cluster.initial_leader == self.id {
-            self.become_initial_leader(&mut cluster_msg_buf, &mut client_msg_buf)
-                .await;
-            let experiment_sync_start = (Utc::now() + Duration::from_secs(2)).timestamp_millis();
-            self.send_cluster_start_signals(experiment_sync_start);
-            self.send_client_start_signals(experiment_sync_start);
-        }
+        self.initialize_cluster(&mut cluster_msg_buf, &mut client_msg_buf)
+            .await;
         let mut optimize_interval = interval(OPTIMIZE_TIMEOUT);
         optimize_interval.tick().await;
         // Main event loop
@@ -124,28 +111,37 @@ impl OmniPaxosServer {
                 break;
             }
         }
-        self.end_log();
     }
 
+    // We don't use Omnipaxos leader election and instead force an initial leader
+    // Once the leader is established it chooses a synchronization point which the
+    // followers relay to their clients to begin the experiment.
     // Ensures cluster is connected and leader is promoted before returning.
-    async fn become_initial_leader(
+    async fn initialize_cluster(
         &mut self,
         cluster_msg_buffer: &mut Vec<(NodeId, ClusterMessage)>,
         client_msg_buffer: &mut Vec<(ClientId, ClientMessage)>,
     ) {
+        let initial_leader = self.config.cluster.initial_leader;
         let mut leader_attempt = 0;
         let mut leader_takeover_interval = tokio::time::interval(LEADER_WAIT);
         loop {
             tokio::select! {
-                _ = leader_takeover_interval.tick() => {
+                _ = leader_takeover_interval.tick(), if self.id == initial_leader => {
                     self.take_leadership(&mut leader_attempt).await;
                     if self.omnipaxos.is_accept_phase_leader() {
                         info!("{}: Leader fully initialized", self.id);
+                        let experiment_sync_start = (Utc::now() + Duration::from_secs(2)).timestamp_millis();
+                        self.send_cluster_start_signals(experiment_sync_start);
+                        self.send_client_start_signals(experiment_sync_start);
                         break;
                     }
                 },
                 _ = self.network.cluster_messages.recv_many(cluster_msg_buffer, NETWORK_BATCH_SIZE) => {
-                    self.handle_cluster_messages(cluster_msg_buffer).await;
+                    let start_signal = self.handle_cluster_messages(cluster_msg_buffer).await;
+                    if start_signal {
+                        break;
+                    }
                 },
                 _ = self.network.client_messages.recv_many(client_msg_buffer, NETWORK_BATCH_SIZE) => {
                     self.handle_client_messages(client_msg_buffer).await;
@@ -306,7 +302,11 @@ impl OmniPaxosServer {
         }
     }
 
-    async fn handle_cluster_messages(&mut self, messages: &mut Vec<(NodeId, ClusterMessage)>) {
+    async fn handle_cluster_messages(
+        &mut self,
+        messages: &mut Vec<(NodeId, ClusterMessage)>,
+    ) -> bool {
+        let mut start_signal = false;
         for (from, message) in messages.drain(..) {
             match message {
                 ClusterMessage::OmniPaxosMessage(m) => {
@@ -330,11 +330,13 @@ impl OmniPaxosServer {
                     self.handle_read_strategy_update(from, strat);
                 }
                 ClusterMessage::LeaderStartSignal(start_time) => {
-                    self.send_client_start_signals(start_time)
+                    start_signal = true;
+                    self.send_client_start_signals(start_time);
                 }
                 ClusterMessage::Done => self.handle_peer_done(from).await,
             }
         }
+        return start_signal;
     }
 
     fn handle_read_request(
@@ -508,23 +510,7 @@ impl OmniPaxosServer {
             cluster_metrics: &self.metrics_server.metrics,
         };
         serde_json::to_writer(&mut self.output_file, &instrumentation).unwrap();
-        self.output_file.write_all(b",\n").unwrap();
-    }
-
-    fn start_log(&mut self) {
-        let config_json = serde_json::to_string_pretty(&self.config).unwrap();
-        let log_start = format!("{{\n \"server_config\": {config_json},\n \"log\": [\n");
-        self.output_file.write_all(log_start.as_bytes()).unwrap();
-        // Dummy log entry to ensure column names in pandas
-        self.log(false, 0.0, &self.strategy.clone(), 0.0, false)
-    }
-
-    fn end_log(&mut self) {
-        // Move back 2 bytes to overwrite the trailing ",\n"
-        self.output_file.seek(SeekFrom::End(-2)).unwrap();
-        let end_array_json = b"\n]\n}";
-        self.output_file.write_all(end_array_json).unwrap();
-        self.output_file.flush().unwrap();
+        self.output_file.write_all(b"\n").unwrap();
     }
 }
 
