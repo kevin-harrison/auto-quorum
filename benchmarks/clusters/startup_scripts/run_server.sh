@@ -23,7 +23,8 @@ CONTAINER_CONFIG_FILE=/server-config.toml
 CLUSTER_CONFIG_FILE=./cluster-config.toml
 CONTAINER_CLUSTER_CONFIG_FILE=/cluster-config.toml
 
-# Generate output directory
+# Generate fresh output directory
+[ -d $OUTPUT_DIR ] && rm -r $OUTPUT_DIR
 mkdir -p "$OUTPUT_DIR"
 
 # Generate configuration files

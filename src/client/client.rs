@@ -57,7 +57,7 @@ impl Client {
         info!("{}: Waiting for start signal from server", self.id);
         match self.network.server_messages.recv().await {
             Some(ServerMessage::StartSignal(start_time)) => {
-                Self::wait_until_sync_time(&mut self.config, start_time).await;
+                Self::wait_until_sync_time(start_time).await;
             }
             _ => panic!("Error waiting for start signal"),
         }
@@ -171,13 +171,12 @@ impl Client {
 
     // Wait until the scheduled start time to synchronize client starts.
     // If start time has already passed, start immediately.
-    async fn wait_until_sync_time(config: &mut ClientConfig, scheduled_start_utc_ms: i64) {
+    async fn wait_until_sync_time(scheduled_start_utc_ms: i64) {
         // // Desync the clients a bit
         // let mut rng = rand::thread_rng();
         // let scheduled_start_utc_ms = scheduled_start_utc_ms + rng.gen_range(1..100);
         let now = Utc::now();
         let milliseconds_until_sync = scheduled_start_utc_ms - now.timestamp_millis();
-        config.sync_time = Some(milliseconds_until_sync);
         // let sync_time = Utc::now() + chrono::Duration::milliseconds(milliseconds_until_sync);
         if milliseconds_until_sync > 0 {
             tokio::time::sleep(Duration::from_millis(milliseconds_until_sync as u64)).await;
@@ -187,7 +186,6 @@ impl Client {
     }
 
     fn save_results(&self) -> Result<(), std::io::Error> {
-        self.client_data.save_summary(self.config.clone())?;
         self.client_data
             .to_csv(self.config.output_filepath.clone())?;
         Ok(())

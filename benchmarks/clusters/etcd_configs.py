@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import asdict, dataclass, replace
 
 import toml
@@ -40,6 +41,16 @@ class ClusterConfig(ClusterConfigProtocol):
         new_config = replace(self, etcd_cluster_config=new_op_config)
         new_config.validate()
         return new_config
+
+    def generate_cluster_json(self) -> str:
+        cluster_dict = asdict(self)
+        for node in self.server_configs:
+            cluster_dict["server_configs"][node]["experiment_output"] = None
+        for node, config in self.client_configs.items():
+            cluster_dict["client_configs"][node][
+                "experiment_output"
+            ] = config.etcd_client_config.output_filepath
+        return json.dumps(cluster_dict, indent=4)
 
 
 @dataclass(frozen=True)

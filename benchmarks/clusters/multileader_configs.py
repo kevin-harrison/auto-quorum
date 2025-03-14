@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import asdict, dataclass, replace
 
 import toml
@@ -75,3 +76,13 @@ class ClusterConfig(ClusterConfigProtocol):
         cluster_config_dict = asdict(self.multileader_cluster_config)
         cluster_toml_str = toml.dumps(cluster_config_dict)
         return cluster_toml_str
+
+    def generate_cluster_json(self) -> str:
+        cluster_dict = asdict(self)
+        for node, config in self.server_configs.items():
+            cluster_dict["server_configs"][node]["experiment_output"] = None
+        for node, config in self.client_configs.items():
+            cluster_dict["client_configs"][node][
+                "experiment_output"
+            ] = config.autoquorum_client_config.output_filepath
+        return json.dumps(cluster_dict, indent=4)

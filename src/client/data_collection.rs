@@ -1,11 +1,9 @@
-use std::{fs::File, io::Write};
+use std::fs::File;
 
 use auto_quorum::common::{kv::CommandId, utils::Timestamp};
 use chrono::Utc;
 use csv::Writer;
 use serde::Serialize;
-
-use crate::configs::ClientConfig;
 
 #[derive(Debug, Serialize, Clone, Copy)]
 struct RequestData {
@@ -49,14 +47,6 @@ impl ClientData {
 
     pub fn request_count(&self) -> usize {
         self.request_data.len()
-    }
-
-    pub fn save_summary(&self, config: ClientConfig) -> Result<(), std::io::Error> {
-        let config_json = serde_json::to_string_pretty(&config)?;
-        let mut summary_file = File::create(config.summary_filepath)?;
-        summary_file.write_all(config_json.as_bytes())?;
-        summary_file.flush()?;
-        Ok(())
     }
 
     pub fn to_csv(&self, file_path: String) -> Result<(), std::io::Error> {

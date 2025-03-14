@@ -31,14 +31,15 @@ class ClientConfigProtocol(Protocol):
 TClientConfig = TypeVar("TClientConfig", bound=ServerConfigProtocol)
 
 
+TClusterConfig = TypeVar("TClusterConfig", bound="ClusterConfigProtocol")
+
+
 class ClusterConfigProtocol(Protocol[TServerConfig, TClientConfig]):
     server_configs: dict[int, TServerConfig]
     client_configs: dict[int, TClientConfig]
 
-    def update_config(self, **kwargs) -> "ClusterConfigProtocol": ...
-
-
-TClusterConfig = TypeVar("TClusterConfig", bound=ClusterConfigProtocol)
+    def update_config(self: TClusterConfig, **kwargs) -> TClusterConfig: ...
+    def generate_cluster_json(self) -> str: ...
 
 
 class ClientServerCluster(ABC, Generic[TClusterConfig]):
@@ -51,12 +52,7 @@ class ClientServerCluster(ABC, Generic[TClusterConfig]):
 
     _gcp_cluster: GcpCluster
     _gcp_ssh_client: GcpClusterSSHClient
-
-    # @classmethod
-    # @abstractmethod
-    # def from_cluster(cls, gcp_cluster: GcpCluster) -> "ClientServerCluster":
-    #     """Construct cluster by reusing a GCP cluster."""
-    #     pass
+    _cluster_config: TClusterConfig
 
     @abstractmethod
     def _start_client_command(self, client_id: int, pull_image: bool = False) -> str:
@@ -93,10 +89,13 @@ class ClientServerCluster(ABC, Generic[TClusterConfig]):
             client_process_ids
         )
         if clients_finished:
+            # TODO: setting for killing servers?
             self._stop_servers_and_clear_clients()
+            pass
         else:
             self._stop_servers_and_clients()
         self._get_logs(logs_directory)
+        self._create_experiment_file(logs_directory)
 
     def shutdown(self):
         instance_names = [
@@ -205,6 +204,12 @@ class ClientServerCluster(ABC, Generic[TClusterConfig]):
                 successes += 1
         print(f"Collected logs from {successes} instances")
 
+    def _create_experiment_file(self, dest_directory: Path):
+        run_json = self._cluster_config.generate_cluster_json()
+        with open(dest_directory / "experiment-summary.json", "w") as experiment_file:
+            experiment_file.write(run_json)
+
     def _cleanup_handler(self, signum, frame):
+        signal.signal(signal.SIGINT, signal.SIG_DFL)
         self._stop_servers_and_clients()
         sys.exit(0)

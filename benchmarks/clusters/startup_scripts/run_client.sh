@@ -22,7 +22,8 @@ CONTAINER_CONFIG_FILE=/client-config.toml
 OUTPUT_DIR=./results
 CONTAINER_OUTPUT_DIR=/app
 
-# Generate output directory
+# Generate fresh output directory
+[ -d $OUTPUT_DIR ] && rm -r $OUTPUT_DIR
 mkdir -p "${OUTPUT_DIR}"
 
 # Generate the configuration file.

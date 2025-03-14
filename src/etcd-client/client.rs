@@ -144,7 +144,7 @@ impl Client {
         } else {
             self.get_cluster_start().await?
         };
-        self.wait_until_sync_time(cluster_start_time).await;
+        Self::wait_until_sync_time(cluster_start_time).await;
         Ok(())
     }
 
@@ -161,7 +161,7 @@ impl Client {
 
     async fn set_cluster_start(&mut self) -> Result<Timestamp, EtcdError> {
         info!("{}: Synchronizing cluster start", self.id);
-        let cluster_sync_start = (Utc::now() + Duration::from_secs(2)).timestamp_millis();
+        let cluster_sync_start = (Utc::now() + Duration::from_secs(4)).timestamp_millis();
         let start_str = cluster_sync_start.to_string();
         self.etcd.put("start", start_str, None).await?;
         Ok(cluster_sync_start)
@@ -169,7 +169,23 @@ impl Client {
 
     async fn get_cluster_start(&mut self) -> Result<Timestamp, EtcdError> {
         info!("{}: Waiting for cluster start", self.id);
+        // Set up watcher for start key
         let (mut watcher, mut watcher_stream) = self.etcd.watch("start", None).await?;
+        // Check if start key is already set
+        match self.etcd.get("start", None).await {
+            Ok(resp) => {
+                debug!("Received: {resp:?}");
+                if let Some(keyvalue) = resp.kvs().get(0) {
+                    let start_str = keyvalue.value_str()?;
+                    match start_str.parse::<i64>() {
+                        Ok(cluster_sync_start) => return Ok(cluster_sync_start),
+                        Err(e) => panic!("Failed to parse cluster start time: {e}"),
+                    };
+                }
+            }
+            Err(e) => panic!("{e}"),
+        }
+        // Otherwise wait for update on start key
         while let Some(resp) = watcher_stream.message().await? {
             debug!("[{}] received watch response", resp.watch_id());
             if resp.canceled() {
@@ -199,14 +215,16 @@ impl Client {
     }
 
     async fn send_request(&mut self, is_write: bool) {
-        let key = self.next_request_id.to_string();
+        // let key = self.next_request_id.to_string();
+        let key = "Some key".to_string();
+        let val = self.next_request_id.to_string();
         debug!("Sending {key:?}");
         let mut client = self.etcd.clone();
         let response_sender = self.response_sender.clone();
         let command_id = self.next_request_id;
         tokio::spawn(async move {
             if is_write {
-                match client.put(key.clone(), key, None).await {
+                match client.put(key, val, None).await {
                     Ok(resp) => debug!("Received: {resp:?}"),
                     Err(e) => panic!("{e}"),
                 }
@@ -233,13 +251,12 @@ impl Client {
 
     // Wait until the scheduled start time to synchronize client starts.
     // If start time has already passed, start immediately.
-    async fn wait_until_sync_time(&mut self, scheduled_start_utc_ms: i64) {
+    async fn wait_until_sync_time(scheduled_start_utc_ms: i64) {
         // // Desync the clients a bit
         // let mut rng = rand::thread_rng();
         // let scheduled_start_utc_ms = scheduled_start_utc_ms + rng.gen_range(1..100);
         let now = Utc::now();
         let milliseconds_until_sync = scheduled_start_utc_ms - now.timestamp_millis();
-        self.config.sync_time = Some(milliseconds_until_sync);
         // let sync_time = Utc::now() + chrono::Duration::milliseconds(milliseconds_until_sync);
         if milliseconds_until_sync > 0 {
             tokio::time::sleep(Duration::from_millis(milliseconds_until_sync as u64)).await;
@@ -249,7 +266,6 @@ impl Client {
     }
 
     fn save_results(&self) -> Result<(), std::io::Error> {
-        self.client_data.save_summary(self.config.clone())?;
         self.client_data
             .to_csv(self.config.output_filepath.clone())?;
         Ok(())

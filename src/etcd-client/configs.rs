@@ -1,6 +1,6 @@
 use std::{env, time::Duration};
 
-use auto_quorum::common::{kv::NodeId, utils::Timestamp};
+use auto_quorum::common::kv::NodeId;
 use config::{Config, ConfigError, Environment, File};
 use serde::{Deserialize, Serialize};
 
@@ -13,8 +13,6 @@ pub struct ClientConfig {
     pub requests: Vec<RequestInterval>,
     pub kill_signal_sec: Option<u64>,
     pub initial_leader: String,
-    pub sync_time: Option<Timestamp>,
-    pub summary_filepath: String,
     pub output_filepath: String,
 }
 
@@ -41,10 +39,6 @@ pub struct RequestInterval {
 }
 
 impl RequestInterval {
-    pub fn get_read_ratio(&self) -> f64 {
-        self.read_ratio
-    }
-
     pub fn get_interval_duration(&self) -> Duration {
         Duration::from_secs(self.duration_sec)
     }

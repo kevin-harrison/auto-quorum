@@ -33,32 +33,6 @@ class EtcdCluster(ClientServerCluster[ClusterConfig]):
     7.   Use `shutdown()` to shut down the GCP instances (or leave them running for reuse).
     """
 
-    _cluster_config: ClusterConfig
-
-    # def _get_logs(self, dest_directory: Path):
-    #     # Make sure destination directory exists
-    #     subprocess.run(["mkdir", "-p", dest_directory])
-    #     instance_results_dir = "./results"
-    #     processes = []
-    #     for config in self._cluster_config.server_configs.values():
-    #         name = config.instance_config.name
-    #         scp_process = self._gcp_cluster.scp_command(
-    #             name, instance_results_dir, dest_directory
-    #         )
-    #         processes.append(scp_process)
-    #     for config in self._cluster_config.client_configs.values():
-    #         name = config.instance_config.name
-    #         scp_process = self._gcp_cluster.scp_command(
-    #             name, instance_results_dir, dest_directory
-    #         )
-    #         processes.append(scp_process)
-    #     successes = 0
-    #     for process in processes:
-    #         process.wait()
-    #         if process.returncode == 0:
-    #             successes += 1
-    #     print(f"Collected logs from {successes} instances")
-
     def _start_server_command(self, server_id: int, pull_image: bool = False) -> str:
         config = self._cluster_config.server_configs[server_id]
         etcd_config = config.etcd_server_config
@@ -71,10 +45,6 @@ class EtcdCluster(ClientServerCluster[ClusterConfig]):
             f"ETCD_INITIAL_ADVERTISE_PEER_URLS={etcd_config.initial_advertise_peer_urls}",
             "bash ./run_container.sh",
         )
-
-        # a = " ".join(start_server_command)
-        # print(a)
-        # raise ValueError()
         return " ".join(start_server_command)
 
     def _start_client_command(self, client_id: int, pull_image: bool = False) -> str:
@@ -97,9 +67,9 @@ class EtcdClusterBuilder:
     Relies on environment variables from `../scripts/project_env.sh` to configure settings.
     """
 
-    def __init__(self, cluster_id: int) -> None:
+    def __init__(self, cluster_id: int = 1) -> None:
         env_vals = self._get_project_env_variables()
-        self.cluster_id = f"{cluster_id}"
+        self.cluster_id = cluster_id
         self._project_id = env_vals["PROJECT_ID"]
         self._service_account = env_vals["SERVICE_ACCOUNT"]
         self._gcloud_ssh_user = env_vals["OSLOGIN_USERNAME"]

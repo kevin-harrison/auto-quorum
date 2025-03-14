@@ -23,7 +23,8 @@ docker run \
   -p 2380:2380 \
   --rm \
   --name server \
-  --env ETCD_DATA_DIR="etcd-data" \
+  --tmpfs /etcd-data:rw,size=100m\
+  --env ETCD_DATA_DIR="/etcd-data" \
   --env ETCD_ALLOW_NONE_AUTHENTICATION="yes" \
   --env ETCD_LISTEN_CLIENT_URLS="http://0.0.0.0:2379" \
   --env ETCD_LISTEN_PEER_URLS="http://0.0.0.0:2380" \
@@ -34,7 +35,3 @@ docker run \
   --env ETCD_INITIAL_ADVERTISE_PEER_URLS=$ETCD_INITIAL_ADVERTISE_PEER_URLS \
   gcr.io/etcd-development/etcd:v3.4.35 \
   2> "./results/xerr-server-$SERVER_ID.log"
-
-# TODO: mount the volume to a temp file system for in-memory etcd
-# https://github.com/kubernetes-sigs/kind/issues/845
-  # --volume=${DATA_DIR}:/etcd-data \

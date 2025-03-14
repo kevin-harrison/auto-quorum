@@ -39,8 +39,6 @@ class AutoQuorumCluster(ClientServerCluster[ClusterConfig]):
     7.   Use `shutdown()` to shut down the GCP instances (or leave them running for reuse).
     """
 
-    _cluster_config: ClusterConfig
-
     def _start_server_command(self, server_id: int, pull_image: bool = False) -> str:
         config = self._cluster_config.server_configs[server_id]
         aq_config = config.autoquorum_server_config
@@ -79,9 +77,9 @@ class AutoQuorumClusterBuilder:
     Relies on environment variables from `../scripts/project_env.sh` to configure settings.
     """
 
-    def __init__(self, cluster_id: int) -> None:
+    def __init__(self, cluster_id: int = 1) -> None:
         env_vals = self._get_project_env_variables()
-        self.cluster_id = f"{cluster_id}"
+        self.cluster_id = cluster_id
         self._project_id = env_vals["PROJECT_ID"]
         self._service_account = env_vals["SERVICE_ACCOUNT"]
         self._gcloud_ssh_user = env_vals["OSLOGIN_USERNAME"]

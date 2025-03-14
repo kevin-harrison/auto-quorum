@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import asdict, dataclass, replace
 from enum import Enum
 
@@ -94,12 +95,33 @@ class ClusterConfig(ClusterConfigProtocol):
 
     def generate_cluster_toml(self) -> str:
         cluster_config_dict = asdict(self.autoquorum_cluster_config)
-        read_strat_enums = cluster_config_dict["initial_read_strat"]
+        read_strat_enums = cluster_config_dict.get("initial_read_strat")
         if read_strat_enums is not None:
             read_strat_strs = [enum.value for enum in read_strat_enums]
             cluster_config_dict["initial_read_strat"] = read_strat_strs
         cluster_toml_str = toml.dumps(cluster_config_dict)
         return cluster_toml_str
+
+    def generate_cluster_json(self) -> str:
+        cluster_dict = asdict(self)
+        # Handle enum serialization
+        aq_config = cluster_dict["autoquorum_cluster_config"]
+        read_strat_enums = aq_config.get("initial_read_strat")
+        if read_strat_enums is not None:
+            read_strat_strs = [enum.value for enum in read_strat_enums]
+            aq_config["initial_read_strat"] = read_strat_strs
+        # Add output filepaths
+        for node, config in self.server_configs.items():
+            if self.autoquorum_cluster_config.optimize == True:
+                output_file = config.autoquorum_server_config.output_filepath
+            else:
+                output_file = None
+            cluster_dict["server_configs"][node]["experiment_output"] = output_file
+        for node, config in self.client_configs.items():
+            cluster_dict["client_configs"][node][
+                "experiment_output"
+            ] = config.autoquorum_client_config.output_filepath
+        return json.dumps(cluster_dict, indent=4)
 
 
 @dataclass(frozen=True)

@@ -13,11 +13,7 @@ use omnipaxos::{
 };
 use omnipaxos_storage::memory_storage::MemoryStorage;
 use serde::Serialize;
-use std::{
-    fs::File,
-    io::{Seek, SeekFrom, Write},
-    time::Duration,
-};
+use std::{fs::File, io::Write, time::Duration};
 use tokio::time::interval;
 
 type OmniPaxosInstance = OmniPaxos<Command, MemoryStorage<Command>>;
@@ -77,7 +73,6 @@ impl MultiLeaderServer {
     }
 
     pub async fn run(&mut self) {
-        self.start_log();
         if self.config.server.num_clients == 0 {
             self.experiment_state.node_finished(self.id);
             for peer in &self.peers {
@@ -122,7 +117,6 @@ impl MultiLeaderServer {
                 break;
             }
         }
-        self.end_log();
     }
 
     // Ensures cluster is connected and leader is promoted before returning.
@@ -364,23 +358,7 @@ impl MultiLeaderServer {
             cluster_metrics: &self.metrics_server.metrics,
         };
         serde_json::to_writer(&mut self.output_file, &instrumentation).unwrap();
-        self.output_file.write_all(b",\n").unwrap();
-    }
-
-    fn start_log(&mut self) {
-        let config_json = serde_json::to_string_pretty(&self.config).unwrap();
-        let log_start = format!("{{\n \"server_config\": {config_json},\n \"log\": [\n");
-        self.output_file.write_all(log_start.as_bytes()).unwrap();
-        // Dummy log entry to ensure column names in pandas
-        self.log()
-    }
-
-    fn end_log(&mut self) {
-        // Move back 2 bytes to overwrite the trailing ",\n"
-        self.output_file.seek(SeekFrom::End(-2)).unwrap();
-        let end_array_json = b"\n]\n}";
-        self.output_file.write_all(end_array_json).unwrap();
-        self.output_file.flush().unwrap();
+        self.output_file.write_all(b"\n").unwrap();
     }
 }
 
