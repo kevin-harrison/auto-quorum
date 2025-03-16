@@ -6,7 +6,7 @@ This repo can be used to build AutoQuorum server and benchmarking client binarie
 # Prerequisites
  - [Rust](https://www.rust-lang.org/tools/install)
  - [Docker](https://www.docker.com/)
- - [protobuf-compiler](https://grpc.io/docs/protoc-installation/)
+ - [protobuf-compiler](https://grpc.io/docs/protoc-installation/) (only required for Etcd client)
 
 # How to run
 The `build_scripts` directory contains various utilities for configuring and running AutoQuorum clients and servers. Also contains examples of TOML file configuration.

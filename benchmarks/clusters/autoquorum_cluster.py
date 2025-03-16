@@ -27,9 +27,9 @@ class AutoQuorumCluster(ClientServerCluster[ClusterConfig]):
     start instances, configure and launch AutoQuorum containers, and manage logs and shutdown operations.
 
     Deployment Steps:
-    1.   Configure project settings (See `./scripts/project_env.sh`). Configure gcloud authentication (see `./scripts/auth.sh`).
+    1.   Configure project settings (See `../scripts/project_env.sh`). Configure gcloud authentication (see `./scripts/auth.sh`).
     2.   Push AutoQuorum server and client Docker images to GCR (Google Cloud Registry).
-         See `./scripts/push-server-image.sh` and `./scripts/push-client-image.sh` for details.
+         See `../scripts/push-server-image.sh` and `../scripts/push-client-image.sh` for details.
     3-4. `__init__` Initializes the cluster by creating GCP instances (using the GcpCluster class) for AutoQuorum servers and clients.
          The instances will run startup scripts (passed via ClusterConfig) to configure Docker for the gcloud OS login user and assign
          DNS names to the servers.

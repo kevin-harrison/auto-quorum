@@ -7,12 +7,12 @@ Documentation on the GCP python client API seems to be scarce. The best resource
  - [uv](https://docs.astral.sh/uv/) a Python project/package manager.
 ## Project Structure
  - `setup-gcp.sh` Initial GCP setup. Only necessary if you are starting a new GCP project.
- - `gcp_cluster.py` Manage cluster of GCP instances.
- - `gcp_ssh_client.py` Manage SSH connections to GCP instances.
- - `autoquorum_cluster.py` Manage AutoQuorum GCP cluster.
- - `autoquorum_configs.py` Defines configs for AutoQuorum.
- - `benchmarks.py` Run AutoQuorum benchmarks, results saved to `benchmarks/logs/`
- - `graph_experiment.py` Graph benchmark data in `benchmarks/logs/`
+ - `scripts` Utilities for configuring the environment and pushing to GCP artifact registry
+ - `clusters/` Classes for creating and managing GCP instances clusters.
+ - `experiments/` Classes for running GCP experiments with defined clusters and workloads
+ - `graphs/` Scripts for graphing the results of the experiments
+ - `benchmarks.py` CLI for running experiments in `experiments/`, results are saved to `logs/`
+ - `graph_experiments.ipynb` Graph experiment data in `logs/`
 ## Deployment steps
 ![gcp-diagram](https://github.com/user-attachments/assets/7dcea25f-f2f5-44a9-a15e-7c18a7e5f517)
 
@@ -22,6 +22,6 @@ Documentation on the GCP python client API seems to be scarce. The best resource
  3. Run the commands in `./scripts/auth.sh` to configure your gcloud credentials
  4. Run `./scripts/push-server-image.sh` and `./scripts/push-client-image.sh` to push docker images to GCP Artifact Registry
  5. Run python code with `uv run <python-file-here>`.
-     - `uv run benchmarks.py` to run AutoQuorum benchmarks
-     - `uv run graph_experiment.py` to graph benchmark data
+     - `uv run benchmarks.py` to run AutoQuorum benchmark experiments
+     - `uv run --with jupyter jupyter notebook graph_experiments.ipynb` to run graphing notebook
 
