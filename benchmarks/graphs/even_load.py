@@ -6,13 +6,15 @@ import numpy as np
 from experiments.experiment_data import ExperimentData
 from graphs.base_graphs import create_base_barchart
 from graphs.colors import strat_colors, strat_hatches
-from graphs.debug_graphs import (
-    graph_cluster_latency,
-    graph_latency_estimation_comparison,
-    graph_server_data,
-)
+from graphs.debug_graphs import (graph_cluster_latency,
+                                 graph_latency_estimation_comparison,
+                                 graph_server_data)
 
 _experiment_dir = Path(__file__).parent.parent / "logs" / "even-load"
+
+
+def even_load_data(cluster_type: str) -> ExperimentData:
+    return ExperimentData(_experiment_dir / cluster_type)
 
 
 def graph_even_load(debug: bool = False):

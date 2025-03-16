@@ -15,6 +15,10 @@ from graphs.debug_graphs import (
 _experiment_dir = Path(__file__).parent.parent / "logs" / "mixed-strats"
 
 
+def mixed_strats_data(cluster_type: str) -> ExperimentData:
+    return ExperimentData(_experiment_dir / cluster_type)
+
+
 def graph_mixed_strat(debug: bool = False):
     if debug:
         aq_data = ExperimentData(_experiment_dir / "AutoQuorum")
@@ -43,7 +47,7 @@ def overview_bar_chart():
     ]
     fig, ax = read_write_latency_bar_chart(experiments)
     fig.suptitle(
-        "Global vs. Per-node Read Strategy Effect on 90-10 Read-Write Workload"
+        "Global vs. Per-node Read Strategy Effect on 50-50 Read-Write Workload"
     )
     ax.legend(
         loc="upper left",

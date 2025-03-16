@@ -72,8 +72,7 @@ class EvenLoadExperiment(BaseExperiment):
 
     def run(self):
         print(f"RUNNING EXPERIMENT: Even Load - {self.cluster_type}")
-        # for read_ratio in [0.0, 0.5, 0.95, 1.0]:
-        for read_ratio in [0.5]:
+        for read_ratio in [0.0, 0.5, 0.95, 1.0]:
             workload = self._even_load_workload(read_ratio)
             self._update_workload(workload)
             print(f"Iteration: {read_ratio=}")

@@ -11,7 +11,11 @@ from experiments.experiment_data import ExperimentData
 from graphs.colors import strat_colors, strat_hatches
 
 
-def create_base_figure(exp_data: ExperimentData, relative_rate: bool = True):
+def create_base_figure(
+    exp_data: ExperimentData,
+    relative_rate: bool = True,
+    show_strategy_changes: bool = False,
+):
     axis_label_size = 20
     axis_tick_size = 12
     fig, axs = plt.subplots(
@@ -48,7 +52,8 @@ def create_base_figure(exp_data: ExperimentData, relative_rate: bool = True):
     axs[0].tick_params(bottom=False)
     axs[1].tick_params(bottom=False)
 
-    graph_strategy_changes(axs[0], exp_data)
+    if show_strategy_changes:
+        graph_strategy_changes(axs[0], exp_data)
     if relative_rate:
         graph_relative_request_rate_subplot(axs[1], exp_data)
     else:
@@ -141,8 +146,6 @@ def graph_timeseries_latency(
             exp_data.normalize_to_experiment_start()
         requests = pd.concat(exp_data.client_data.values())
         average_latency = requests["response_latency"].resample("3s").mean()
-        if experiment_name == "AutoQuorum":
-            place_strategy_change_markers(axs[0], exp_data, average_latency)
         axs[0].plot(
             average_latency.index,
             average_latency,
@@ -152,6 +155,8 @@ def graph_timeseries_latency(
             # marker=strat_markers[experiment_name],
             linewidth=2,
         )
+        if experiment_name == "AutoQuorum":
+            place_strategy_change_markers(axs[0], exp_data, average_latency)
     return fig, axs
 
 
@@ -298,7 +303,13 @@ def server_breakdown_bar_chart(
             _, read_std, _ = get_std_devs(client_requests)
             strat_avgs[client - 1] = read_avg
             strat_stds[client - 1] = read_std
-            bar_group_labels[client - 1] = location
+            if strat == "BallotRead":
+                leader = exp_data.experiment_summary["autoquorum_cluster_config"][
+                    "initial_leader"
+                ]
+                if client == leader:
+                    location += "*"
+                bar_group_labels[client - 1] = location
         latency_means[label] = (
             strat_avgs,
             strat_stds,

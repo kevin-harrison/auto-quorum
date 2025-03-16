@@ -15,6 +15,10 @@ from graphs.debug_graphs import (
 _experiment_dir = Path(__file__).parent.parent / "logs" / "read-strats"
 
 
+def read_strats_data(cluster_type: str) -> ExperimentData:
+    return ExperimentData(_experiment_dir / cluster_type)
+
+
 def graph_read_strats(debug: bool = False):
     if debug:
         aq_data = ExperimentData(_experiment_dir / "AutoQuorum")

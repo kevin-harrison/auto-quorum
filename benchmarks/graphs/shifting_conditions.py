@@ -7,6 +7,12 @@ from experiments.experiment_data import ExperimentData
 from experiments.shifting_conditions_experiment import ShiftingConditionsExperiment
 from graphs.colors import strat_colors
 
+_experiment_dir = Path(__file__).parent.parent / "logs" / "shifting-conditions"
+
+
+def shifting_conditions_data(cluster_type: str) -> ExperimentData:
+    return ExperimentData(_experiment_dir / cluster_type)
+
 
 def graph_shifting_conditions():
     df = get_shifting_conditions_data()
@@ -86,7 +92,6 @@ def graph_shifting_conditions():
 
 # Stitch together periods into a single dataframe with continuous time
 def get_shifting_conditions_data() -> pd.DataFrame:
-    experiment_dir = Path(__file__).parent.parent / "logs" / "shifting-conditions"
     all_data = []
     epoch_start = pd.Timestamp("20180606")
     for opt in ShiftingConditionsExperiment.CLUSTER_TYPES:
@@ -94,7 +99,7 @@ def get_shifting_conditions_data() -> pd.DataFrame:
             continue
         period_time = epoch_start
         for period in [1, 2, 4]:
-            iteration_dir = experiment_dir / f"period-{period}" / f"{opt}"
+            iteration_dir = _experiment_dir / f"period-{period}" / f"{opt}"
             exp_data = ExperimentData(iteration_dir)
             period_dur = get_period_duration(exp_data)
             requests = pd.concat(exp_data.client_data.values())

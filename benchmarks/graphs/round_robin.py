@@ -13,6 +13,10 @@ from graphs.debug_graphs import (
 _experiment_directory = Path(__file__).parent.parent / "logs" / "round-robin"
 
 
+def round_robin_data(cluster_type: str) -> ExperimentData:
+    return ExperimentData(_experiment_directory / cluster_type)
+
+
 def graph_round_robin(debug: bool = False):
     aq_data = ExperimentData(_experiment_directory / "AutoQuorum")
     if debug:
@@ -39,8 +43,3 @@ def graph_round_robin(debug: bool = False):
     # plt.savefig("logs/autoquorum-to-show/round-robin-5.svg", format="svg")
     plt.show()
     plt.close()
-
-
-def round_robin_reconfigurations():
-    aq_data = ExperimentData(_experiment_directory / "AutoQuorum")
-    aq_data.show_reconfigurations()

@@ -11,7 +11,9 @@ def graph_server_data(exp_data):
 
     for id, server_metrics in exp_data.server_data.items():
         title = f"Server {id} ({exp_data.get_server_location(id)}) Metrics"
-        fig, axs = create_base_figure(exp_data, relative_rate=False)
+        fig, axs = create_base_figure(
+            exp_data, relative_rate=False, show_strategy_changes=True
+        )
         fig.suptitle(title, y=0.95)
 
         # Graph request latencies
@@ -100,7 +102,9 @@ def graph_server_data(exp_data):
 def graph_latency_estimation_comparison(exp_data: ExperimentData):
     exp_data.show_reconfigurations()
     title = "Average request latency vs. optimizer predicted latency"
-    fig, axs = create_base_figure(exp_data, relative_rate=False)
+    fig, axs = create_base_figure(
+        exp_data, relative_rate=False, show_strategy_changes=True
+    )
     fig.suptitle(title, y=0.95)
 
     # Combine client requests in experiment
@@ -125,7 +129,9 @@ def graph_latency_estimation_comparison(exp_data: ExperimentData):
 def graph_cluster_latency(exp_data: ExperimentData):
     exp_data.show_reconfigurations()
     title = "Cluster-wide Request Latency"
-    fig, axs = create_base_figure(exp_data, relative_rate=False)
+    fig, axs = create_base_figure(
+        exp_data, relative_rate=False, show_strategy_changes=True
+    )
     fig.suptitle(title, y=0.95)
 
     # Request latency

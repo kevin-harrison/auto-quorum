@@ -92,12 +92,24 @@ class ExperimentData:
             raise ValueError(f"Don't have color for location {client_zone}")
         return name
 
+    def show_initial_cluster_strategy(self):
+        aq_config = self.experiment_summary.get("autoquorum_cluster_config")
+        ml_config = self.experiment_summary.get("multileader_cluster_config")
+        config = aq_config or ml_config
+        if config is not None:
+            printable_config = {k: v for k, v in config.items() if k != "node_addrs"}
+            try:
+                display(printable_config)
+            except NameError:
+                print(printable_config)
+        else:
+            print("No initial cluster strategy")
+
     def show_reconfigurations(self):
         if self.strategy_data is not None:
             reconfigurations = self.strategy_data[
                 self.strategy_data["reconfigure"]
             ].drop(columns=["reconfigure", "leader", "operation_latency"])
-            print("RECONFIGUATIONS")
             pd.set_option("display.max_colwidth", 500)
             try:
                 display(reconfigurations)
