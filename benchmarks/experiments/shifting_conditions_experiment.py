@@ -34,13 +34,13 @@ class ShiftingConditionsExperiment(BaseExperiment):
             "AutoQuorum": self._autoquorum_cluster,
             "MultiLeader-SuperMajority": self._multileader_supermajority_cluster,
             "MultiLeader-Majority": self._multileader_majority_cluster,
-            "Etcd": lambda: self._etcd_cluster(1),
+            "Etcd": lambda: self._etcd_cluster(2),
         }
         return cluster_types[self.cluster_type]()
 
     def _autoquorum_cluster(self) -> AutoQuorumCluster:
         cluster = (
-            self._autoquorum_builder_base().initial_leader(1).optimize_setting(False)
+            self._autoquorum_builder_base().initial_leader(2).optimize_setting(False)
         )
         return cluster.build()
 
@@ -56,7 +56,7 @@ class ShiftingConditionsExperiment(BaseExperiment):
             hotspot = None
         else:
             raise ValueError("Unsupported shifting workload period")
-        period_dur = 10
+        period_dur = 60
         low_requests = [RequestInterval(period_dur, 10, read_ratio)]
         high_requests = [RequestInterval(period_dur, 30, read_ratio)]
 
@@ -76,7 +76,7 @@ class ShiftingConditionsExperiment(BaseExperiment):
         self._update_workload(period1_workload)
         self.cluster.run(self.experiment_dir / f"period-1/{self.cluster_type}")
 
-        # Period 2 (US node faiure)
+        # Period 2 (US node failure)
         print("PERIOD 2:")
         failed_node = 1
         period2_workload = self._shifting_workload(period=2)
@@ -102,6 +102,7 @@ class ShiftingConditionsExperiment(BaseExperiment):
         self._update_workload(period4_workload)
         if self.cluster_type == "AutoQuorum":
             self.cluster.change_cluster_config(
+                initial_leader=2,
                 initial_flexible_quorum=FlexibleQuorum(2, 4),
                 initial_read_strat=[ReadStrategy.BallotRead] * 5,
             )

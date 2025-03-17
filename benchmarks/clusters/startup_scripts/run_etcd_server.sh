@@ -26,6 +26,7 @@ docker run \
   --tmpfs /etcd-data:rw,size=100m\
   --env ETCD_DATA_DIR="/etcd-data" \
   --env ETCD_ALLOW_NONE_AUTHENTICATION="yes" \
+  --env ETCD_LOGGER="zap" \
   --env ETCD_LISTEN_CLIENT_URLS="http://0.0.0.0:2379" \
   --env ETCD_LISTEN_PEER_URLS="http://0.0.0.0:2380" \
   --env ETCD_INITIAL_CLUSTER_STATE="new" \

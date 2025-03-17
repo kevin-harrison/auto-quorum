@@ -92,31 +92,22 @@ class ExperimentData:
             raise ValueError(f"Don't have color for location {client_zone}")
         return name
 
-    def show_initial_cluster_strategy(self):
+    def initial_cluster_strategy(self) -> dict | None:
         aq_config = self.experiment_summary.get("autoquorum_cluster_config")
         ml_config = self.experiment_summary.get("multileader_cluster_config")
         config = aq_config or ml_config
-        if config is not None:
-            printable_config = {k: v for k, v in config.items() if k != "node_addrs"}
-            try:
-                display(printable_config)
-            except NameError:
-                print(printable_config)
-        else:
-            print("No initial cluster strategy")
+        if config is None:
+            return None
+        printable_config = {k: v for k, v in config.items() if k != "node_addrs"}
+        return printable_config
 
-    def show_reconfigurations(self):
-        if self.strategy_data is not None:
-            reconfigurations = self.strategy_data[
-                self.strategy_data["reconfigure"]
-            ].drop(columns=["reconfigure", "leader", "operation_latency"])
-            pd.set_option("display.max_colwidth", 500)
-            try:
-                display(reconfigurations)
-            except NameError:
-                print(reconfigurations)
-        else:
-            print("NO RECONFIGURATIONS")
+    def reconfigurations(self) -> pd.Series | pd.DataFrame | None:
+        if self.strategy_data is None:
+            return None
+        reconfig_rows = self.strategy_data[self.strategy_data["reconfigure"]]
+        return reconfig_rows.drop(
+            columns=["reconfigure", "leader", "operation_latency"]
+        )
 
     def normalize_to_experiment_start(self):
         epoch_start = pd.Timestamp("20180606")

@@ -15,8 +15,8 @@ from graphs.debug_graphs import (
 _experiment_dir = Path(__file__).parent.parent / "logs" / "mixed-strats"
 
 
-def mixed_strats_data(cluster_type: str) -> ExperimentData:
-    return ExperimentData(_experiment_dir / cluster_type)
+def mixed_strats_data(iteration_path: str) -> ExperimentData:
+    return ExperimentData(_experiment_dir / iteration_path)
 
 
 def graph_mixed_strat(debug: bool = False):
@@ -25,12 +25,12 @@ def graph_mixed_strat(debug: bool = False):
         graph_server_data(aq_data)
         graph_latency_estimation_comparison(aq_data)
         graph_cluster_latency(aq_data)
-    overview_bar_chart()
-    breakdown_bar_chart()
-    graph_mixed_strats_over_workload()
+    mixed_strats_overview_bar_chart()
+    mixed_strats_breakdown_bar_chart()
+    graph_mixed_strats_varied_workloads()
 
 
-def overview_bar_chart():
+def mixed_strats_overview_bar_chart():
     experiments = [
         ("AutoQuorum", "AutoQuorum", ExperimentData(_experiment_dir / "AutoQuorum")),
         # ("Mixed", "[LA, (4,2), MIX]", ExperimentData(_experiment_dir / "Mixed")),
@@ -60,7 +60,7 @@ def overview_bar_chart():
     plt.close()
 
 
-def breakdown_bar_chart():
+def mixed_strats_breakdown_bar_chart():
     experiments = [
         (
             "ReadAsWrite",
@@ -87,10 +87,10 @@ def breakdown_bar_chart():
     plt.close()
 
 
-def graph_mixed_strats_over_workload():
+def graph_mixed_strats_varied_workloads():
     strats = ["BallotRead", "Mixed", "ReadAsWrite", "AutoQuorum"]
     labels = {"BallotRead": "DQR", "EPaxos": "EPaxos fast path"}
-    fig, axs = plt.subplots(1, 2, figsize=(18, 6), constrained_layout=True, sharey=True)
+    fig, axs = plt.subplots(1, 2, figsize=(18, 6), sharey=True)
     fig.suptitle(f"Mixed Strats - Latency Over Varied Workloads", size=20)
     graph_varied_read_ratio(axs[0], _experiment_dir, strats, labels)
     graph_varied_skew(axs[1], _experiment_dir, strats, labels)

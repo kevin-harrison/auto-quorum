@@ -15,8 +15,8 @@ from graphs.debug_graphs import (
 _experiment_dir = Path(__file__).parent.parent / "logs" / "read-strats"
 
 
-def read_strats_data(cluster_type: str) -> ExperimentData:
-    return ExperimentData(_experiment_dir / cluster_type)
+def read_strats_data(iteration_path: str) -> ExperimentData:
+    return ExperimentData(_experiment_dir / iteration_path)
 
 
 def graph_read_strats(debug: bool = False):
@@ -25,12 +25,12 @@ def graph_read_strats(debug: bool = False):
         graph_server_data(aq_data)
         graph_latency_estimation_comparison(aq_data)
         graph_cluster_latency(aq_data)
-    overview_bar_chart()
-    breakdown_bar_chart()
-    graph_read_strats_over_workloads()
+    read_strats_overview_bar_chart()
+    read_strats_breakdown_bar_chart()
+    graph_read_strats_varied_workloads()
 
 
-def overview_bar_chart():
+def read_strats_overview_bar_chart():
     experiments = [
         (
             "BallotRead",
@@ -50,7 +50,7 @@ def overview_bar_chart():
         ("AutoQuorum", "AutoQuorum", ExperimentData(_experiment_dir / "AutoQuorum")),
     ]
     fig, ax = read_write_latency_bar_chart(experiments)
-    fig.suptitle(f"Read Strategy Effect on 90% Read Ratio Workload")
+    fig.suptitle(f"Read Strategy Effect on 90% Read Ratio Workload TSTS")
     ax.legend(
         loc="lower center",
         bbox_to_anchor=(0.5, 1.02),
@@ -63,7 +63,7 @@ def overview_bar_chart():
     plt.close()
 
 
-def breakdown_bar_chart():
+def read_strats_breakdown_bar_chart():
     experiments = [
         (
             "BallotRead",
@@ -90,10 +90,10 @@ def breakdown_bar_chart():
     plt.close()
 
 
-def graph_read_strats_over_workloads():
+def graph_read_strats_varied_workloads():
     strats = ["QuorumRead", "BallotRead", "ReadAsWrite", "AutoQuorum"]
     labels = {"BallotRead": "DQR", "EPaxos": "EPaxos fast path"}
-    fig, axs = plt.subplots(1, 3, figsize=(18, 6), constrained_layout=True, sharey=True)
+    fig, axs = plt.subplots(1, 3, figsize=(18, 6), sharey=True)
     fig.suptitle(f"Read Strats - Latency Over Varied Workloads", size=20)
     graph_varied_read_ratio(axs[0], _experiment_dir, strats, labels)
     graph_varied_absolute_rate(axs[1], _experiment_dir, strats, labels)

@@ -89,9 +89,7 @@ class ClientServerCluster(ABC, Generic[TClusterConfig]):
             client_process_ids
         )
         if clients_finished:
-            # TODO: setting for killing servers?
             self._stop_servers_and_clear_clients()
-            pass
         else:
             self._stop_servers_and_clients()
         self._get_logs(logs_directory)
