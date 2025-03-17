@@ -44,6 +44,10 @@ impl Client {
             self.save_results().expect("Failed to save results");
             return;
         }
+        self.initialize_leader_and_sychronize_cluster_start()
+            .await
+            .expect("Couldn't initialize cluster");
+
         match self.config.kill_signal_sec {
             Some(0) => {
                 info!("{}: Removing server from cluster", self.id);
@@ -55,16 +59,13 @@ impl Client {
                 self.etcd
                     .member_remove(my_servers_id)
                     .await
-                    .expect("Could't remove server");
+                    .expect("Couldn't remove server");
+                self.save_results().expect("Failed to save results");
                 return;
             }
             Some(_) => unimplemented!(),
             None => (),
         }
-
-        self.initialize_leader_and_sychronize_cluster_start()
-            .await
-            .expect("Counldn't initialize cluster");
 
         // Initialize intervals
         let mut rng = rand::thread_rng();
